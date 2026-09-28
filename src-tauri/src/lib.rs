@@ -118,6 +118,7 @@ pub fn run() {
             commands::delete_deck,
             commands::delete_card,
             commands::update_card,
+            commands::save_card_content,
             commands::search_cards,
             commands::start_review,
             commands::review_queue,

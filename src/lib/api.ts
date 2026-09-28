@@ -57,6 +57,8 @@ export const api = {
   deleteCard: (cardId: number) => invoke<void>("delete_card", { cardId }),
   updateCard: (cardId: number, title: string, contentMd: string) =>
     invoke<CardDto>("update_card", { cardId, title, contentMd }),
+  saveCardContent: (cardId: number, contentMd: string) =>
+    invoke<CardDto>("save_card_content", { cardId, contentMd }),
   searchCards: (query: string | null, deck: string | null, filter: string) =>
     invoke<CardDto[]>("search_cards", { query, deck, filter }),
   startReview: (cardIds: number[]) => invoke<number>("start_review", { cardIds }),

@@ -529,6 +529,8 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Any UI edit (deck browser or popup annotation) counts as a local edit:
+    /// re-imports must not silently overwrite it (SPEC §5.3 / §9.3).
     pub fn update_card(
         &self,
         card_id: i64,
@@ -536,7 +538,7 @@ impl Db {
         content_md: &str,
     ) -> rusqlite::Result<bool> {
         let n = self.0.execute(
-            "UPDATE card SET title=?1, content_md=?2 WHERE id=?3",
+            "UPDATE card SET title=?1, content_md=?2, locally_edited=1 WHERE id=?3",
             rusqlite::params![title, content_md, card_id],
         )?;
         Ok(n > 0)

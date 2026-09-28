@@ -131,6 +131,11 @@ pub fn update_card(
 }
 
 #[tauri::command]
+pub fn save_card_content(card_id: i64, content_md: String, db: DbState) -> Result<CardDto, String> {
+    services::update_card_content(&lock(&db), card_id, &content_md)
+}
+
+#[tauri::command]
 pub fn due_queue(limit: i64, db: DbState) -> Result<Vec<CardDto>, String> {
     services::due_queue(&lock(&db), limit)
 }

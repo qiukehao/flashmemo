@@ -374,6 +374,25 @@ pub fn update_card(
         .ok_or_else(|| "card disappeared after update".into())
 }
 
+/// Popup annotation save (SPEC §9.3): content-only write, flagged as a local
+/// edit so re-imports keep the annotated version.
+pub fn update_card_content(db: &Db, card_id: i64, content_md: &str) -> Result<CardDto, String> {
+    let card = db
+        .get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    if !db
+        .update_card(card_id, &card.title, content_md)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("卡片不存在".into());
+    }
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared after update".into())
+}
+
 /// Search + filter for the deck browser (SPEC §15.2 搜索/筛选).
 pub fn search_cards(
     db: &Db,
@@ -882,6 +901,31 @@ mod tests {
             ("新题", "新内容")
         );
         assert!(update_card(&d, dto.id, "", "x").is_err());
+    }
+
+    #[test]
+    fn popup_annotation_save_marks_local_edit_and_survives_reimport() {
+        let d = db();
+        let files = vec![ImportFile {
+            name: "notes.md".into(),
+            content: "# D\n\n## C\n\n### 卡\n原始内容\n".into(),
+        }];
+        import_markdown(&d, &files, false).unwrap();
+        let id =
+            d.0.query_row("SELECT id FROM card WHERE title='卡'", [], |r| r.get(0))
+                .unwrap();
+        let after = update_card_content(&d, id, "原始内容 ==重点== %%我的批注%%").unwrap();
+        assert!(after.content_md.contains("我的批注"));
+        let card = d.get_card(id).unwrap().unwrap();
+        assert!(
+            card.locally_edited,
+            "annotation save must set the local-edit flag"
+        );
+        // Re-importing the same file keeps the annotated version.
+        let report = import_markdown(&d, &files, false).unwrap();
+        assert_eq!(report.conflicts, 1);
+        let card = d.get_card(id).unwrap().unwrap();
+        assert!(card.content_md.contains("我的批注"));
     }
 
     #[test]
