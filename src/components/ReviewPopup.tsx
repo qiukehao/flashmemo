@@ -11,10 +11,9 @@ function closeWindow() {
 }
 
 const RATINGS: { name: RatingName; label: string; idx: number }[] = [
-  { name: "again", label: "重来", idx: 0 },
-  { name: "hard", label: "困难", idx: 1 },
-  { name: "good", label: "良好", idx: 2 },
-  { name: "easy", label: "简单", idx: 3 },
+  { name: "unknown", label: "不了解", idx: 0 },
+  { name: "familiar", label: "熟悉", idx: 1 },
+  { name: "speakable", label: "可以讲出来", idx: 2 },
 ];
 
 const HINT_MAX = 3;
@@ -23,7 +22,7 @@ export default function ReviewPopup() {
   const [queue, setQueue] = useState<CardDto[]>([]);
   const [idx, setIdx] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  const [previews, setPreviews] = useState<(number | null)[]>([]);
+  const [previews, setPreviews] = useState<number[]>([]);
   const [hintCount, setHintCount] = useState(HINT_MAX);
   const hintSaved = useRef(true);
 
@@ -46,13 +45,15 @@ export default function ReviewPopup() {
     })();
   }, []);
 
-  // Fetch interval previews per card (SPEC §7.5: buttons show the next interval).
+  // Fetch interval previews per card (SPEC §7.5: buttons show the next
+  // interval) and record the display for throttling (design §2).
   useEffect(() => {
     if (!card) return;
     api
       .previewIntervals(card.id)
       .then(setPreviews)
       .catch(() => setPreviews([]));
+    api.markShown(card.id).catch(() => {});
     if (hintSaved.current) return;
     hintSaved.current = true;
     if (card.state === "new" && hintCount < HINT_MAX) {
@@ -129,6 +130,7 @@ export default function ReviewPopup() {
       <header className="popup-header" data-tauri-drag-region>
         <span className="popup-crumb" data-tauri-drag-region>
           {card.deck} · {card.chapter}
+          {card.needsAttention && " ⚠ 需专项理解"}
         </span>
         <button className="popup-close" onClick={() => void closeAll()} title="关闭并跳过剩余">
           ✕
@@ -153,7 +155,7 @@ export default function ReviewPopup() {
       <footer className="popup-footer">
         {showHint && (
           <div className="popup-hint">
-            1=重来 2=困难 3=良好 4=简单，按钮下方的数字是下次出现间隔
+            1=不了解 2=熟悉 3=可以讲出来，按钮下方的数字是下次出现间隔
           </div>
         )}
         <div className="popup-buttons">

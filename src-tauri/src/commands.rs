@@ -146,8 +146,13 @@ pub fn skip_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
 }
 
 #[tauri::command]
-pub fn preview_intervals(card_id: i64, db: DbState) -> Result<Vec<Option<f64>>, String> {
+pub fn preview_intervals(card_id: i64, db: DbState) -> Result<Vec<u32>, String> {
     services::preview_intervals(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn mark_card_shown(card_id: i64, db: DbState) -> Result<(), String> {
+    services::mark_shown(&lock(&db), card_id)
 }
 
 #[tauri::command]

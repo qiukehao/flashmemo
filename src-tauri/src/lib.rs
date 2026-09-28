@@ -125,6 +125,7 @@ pub fn run() {
             commands::rate_card,
             commands::skip_card,
             commands::preview_intervals,
+            commands::mark_card_shown,
             commands::due_count,
             commands::get_settings,
             commands::set_settings,

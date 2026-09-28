@@ -5,8 +5,8 @@
 use crate::db::{self, Card, Db, NewCard};
 use crate::import::{self, ImportReport};
 use crate::parser::{parse_markdown, ParsedDeck};
-use crate::scheduler::{self, CardSched, CardState, Rating, ScheduleConfig};
-use chrono::Utc;
+use crate::scheduler::{self, CardSched, Rating, ScheduleConfig};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -19,7 +19,7 @@ pub struct CardDto {
     pub content_md: String,
     pub state: String,
     pub due_at: String,
-    pub learning_step: i64,
+    pub needs_attention: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,42 +48,21 @@ pub struct ImportPreview {
     pub deck_names: Vec<String>,
 }
 
-fn state_to_str(s: CardState) -> &'static str {
-    match s {
-        CardState::New => "new",
-        CardState::Learning => "learning",
-        CardState::Review => "review",
-        CardState::Relearning => "relearning",
-    }
-}
-
-fn state_from_str(s: &str) -> Option<CardState> {
-    match s {
-        "new" => Some(CardState::New),
-        "learning" => Some(CardState::Learning),
-        "review" => Some(CardState::Review),
-        "relearning" => Some(CardState::Relearning),
-        _ => None,
-    }
-}
-
 fn rating_from_str(s: &str) -> Option<Rating> {
     match s {
-        "again" => Some(Rating::Again),
-        "hard" => Some(Rating::Hard),
-        "good" => Some(Rating::Good),
-        "easy" => Some(Rating::Easy),
+        "unknown" => Some(Rating::Unknown),
+        "familiar" => Some(Rating::Familiar),
+        "speakable" => Some(Rating::Speakable),
         _ => None,
     }
 }
 
-/// SPEC §14 review_log rating codes.
+/// SPEC §14 review_log rating codes (new scale: 1 不了解 / 2 熟悉 / 3 可以讲出来).
 fn rating_num(r: Rating) -> i64 {
     match r {
-        Rating::Again => 1,
-        Rating::Hard => 2,
-        Rating::Good => 3,
-        Rating::Easy => 4,
+        Rating::Unknown => 1,
+        Rating::Familiar => 2,
+        Rating::Speakable => 3,
     }
 }
 
@@ -96,40 +75,63 @@ fn to_dto(c: &Card) -> CardDto {
         content_md: c.content_md.clone(),
         state: c.state.clone(),
         due_at: db::fmt_time(c.due_at),
-        learning_step: c.learning_step,
+        needs_attention: c.needs_attention,
     }
 }
 
 fn to_sched(c: &Card) -> CardSched {
     CardSched {
-        state: state_from_str(&c.state).unwrap_or(CardState::New),
-        stability: c.stability.map(|s| s as f32),
-        difficulty: c.difficulty.map(|d| d as f32),
-        learning_step: c.learning_step.max(0) as usize,
-        last_review_at: c.last_review_at,
+        interval_min: c.interval_minutes.map(|v| v.max(0) as u32),
+        unknown_streak: c.unknown_streak.max(0) as u32,
+        speak_streak: c.speak_streak.max(0) as u32,
+        needs_attention: c.needs_attention,
     }
 }
 
-/// Settings-driven config; falls back to SPEC §7.4 defaults per key.
+fn get_u32(db: &Db, key: &str, default: u32) -> u32 {
+    db.get_setting(key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn get_f64(db: &Db, key: &str, default: f64) -> f64 {
+    db.get_setting(key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Settings-driven config (SPEC §7.4). The ordering invariant
+/// `min ≤ initial ≤ familiar_cap ≤ max` is re-established by chaining clamps.
 fn cfg_from_db(db: &Db) -> ScheduleConfig {
     let mut cfg = ScheduleConfig::default();
-    if let Some(v) = db.get_setting("steps_min").ok().flatten() {
-        // Present-but-empty means intermittent mode: no minute-level steps at
-        // all (SPEC §7.2 修订). A missing key keeps the 1/5/10 default.
-        cfg.steps_min = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-    }
-    if let Some(v) = db.get_setting("retention").ok().flatten() {
-        if let Ok(r) = v.parse::<f32>() {
-            let clamped = r.clamp(0.80, 0.95);
-            cfg.retention = clamped;
-        }
-    }
-    if let Some(v) = db.get_setting("skip_delay_min").ok().flatten() {
-        if let Ok(m) = v.parse::<u32>() {
-            cfg.skip_delay_min = m.clamp(10, 120);
-        }
-    }
+    let min = get_u32(db, "min_interval_min", 120).max(30);
+    let max = (get_u32(db, "max_interval_days", 60).max(1) * 1440).max(min);
+    let familiar_cap = (get_u32(db, "familiar_cap_days", 7).max(1) * 1440).clamp(min, max);
+    let initial = (get_u32(db, "initial_interval_days", 1).max(1) * 1440).clamp(min, familiar_cap);
+    cfg.min_interval_min = min;
+    cfg.initial_interval_min = initial;
+    cfg.familiar_cap_min = familiar_cap;
+    cfg.max_interval_min = max;
+    cfg.familiar_mult = get_f64(db, "familiar_mult", 1.5).clamp(1.0, 10.0);
+    cfg.speak_mult = get_f64(db, "speak_mult", 2.5).clamp(cfg.familiar_mult, 10.0);
+    cfg.attention_threshold = get_u32(db, "attention_threshold", 3).max(2);
+    cfg.attention_interval_min =
+        (get_u32(db, "attention_interval_days", 1).max(1) * 1440).clamp(min, max);
     cfg
+}
+
+/// Display throttling (SPEC §7 队列规则): (同卡最小展示间隔, 滚动24h上限,
+/// 每日新卡上限, 每次会话新卡上限).
+fn queue_limits(db: &Db) -> (u32, i64, i64, i64) {
+    let gap = get_u32(db, "min_display_gap_min", 120).max(1);
+    let max_shows = get_u32(db, "max_daily_shows", 2).clamp(1, 5) as i64;
+    let daily_new = get_u32(db, "daily_new_limit", 5) as i64;
+    let session_new = get_u32(db, "session_new_limit", 1).clamp(0, 10) as i64;
+    (gap, max_shows, daily_new, session_new)
 }
 
 pub fn add_card(
@@ -242,13 +244,36 @@ pub fn list_overview(db: &Db) -> Result<Vec<DeckOverview>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Popup queue (design §4): due review cards first (oldest due, display-capped),
+/// then new cards within the per-session and rolling-24h quotas. Fewer
+/// candidates than `limit` means a shorter session; zero means no popup.
 pub fn due_queue(db: &Db, limit: i64) -> Result<Vec<CardDto>, String> {
-    Ok(db
-        .list_due(Utc::now(), limit)
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(to_dto)
-        .collect())
+    let now = Utc::now();
+    let (gap_min, max_shows, daily_new, session_new) = queue_limits(db);
+    let gap_cutoff = now - Duration::minutes(gap_min as i64);
+    let day_cutoff = now - Duration::hours(24);
+
+    let mut cards = db
+        .due_review_cards(now, limit, gap_cutoff, day_cutoff, max_shows)
+        .map_err(|e| e.to_string())?;
+
+    let remaining = (limit - cards.len() as i64).max(0);
+    if remaining > 0 && session_new > 0 {
+        let introduced = db
+            .new_introduced_since(day_cutoff)
+            .map_err(|e| e.to_string())?;
+        let quota = (daily_new - introduced)
+            .clamp(0, session_new)
+            .min(remaining);
+        if quota > 0 {
+            cards.extend(
+                db.new_cards_eligible(quota, gap_cutoff, day_cutoff, max_shows)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+    }
+
+    Ok(cards.iter().map(to_dto).collect())
 }
 
 /// Read-only deck browsing (SPEC §15.2 卡包管理 的 M1 只读预览).
@@ -369,6 +394,10 @@ pub fn due_cards_of_deck(db: &Db, deck: &str) -> Result<Vec<CardDto>, String> {
 
 /// Rate a card: scheduler decides, then card update + review_log row commit in
 /// one transaction (SPEC §17: a crash must never lose a rating).
+///
+/// Early practice (design §2): a not-yet-due card rated Familiar/Speakable is
+/// only logged — positive practice must not stretch its schedule. Unknown on an
+/// early card applies normally (finding out you forgot is real information).
 pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> {
     let r = rating_from_str(rating).ok_or_else(|| format!("未知评分: {rating}"))?;
     let card = db
@@ -377,22 +406,35 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
         .ok_or("卡片不存在")?;
     let cfg = cfg_from_db(db);
     let now = Utc::now();
-    let out = scheduler::review(&to_sched(&card), r, now, &cfg).map_err(|e| e.to_string())?;
 
-    let lapsed = card.state == "review" && r == Rating::Again;
+    if card.due_at > now && r != Rating::Unknown {
+        let tx = db.0.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO review_log(card_id, rating, state_before, scheduled_interval, reviewed_at)
+             VALUES(?1, ?2, ?3, NULL, ?4)",
+            rusqlite::params![card_id, rating_num(r), card.state, db::fmt_time(now)],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(to_dto(&card));
+    }
+
+    let out = scheduler::review(&to_sched(&card), r, now, &cfg);
+    let lapsed = i64::from(r == Rating::Unknown);
     let tx = db.0.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "UPDATE card SET state=?1, stability=?2, difficulty=?3, due_at=?4,
-         last_review_at=?5, reps=reps+1, lapses=lapses+?6, learning_step=?7
+        "UPDATE card SET state='review', interval_minutes=?1, due_at=?2,
+         unknown_streak=?3, speak_streak=?4, needs_attention=?5,
+         last_review_at=?6, reps=reps+1, lapses=lapses+?7
          WHERE id=?8",
         rusqlite::params![
-            state_to_str(out.state),
-            out.stability,
-            out.difficulty,
+            i64::from(out.interval_min),
             db::fmt_time(out.due_at),
+            i64::from(out.unknown_streak),
+            i64::from(out.speak_streak),
+            i64::from(out.needs_attention),
             db::fmt_time(now),
-            i64::from(lapsed),
-            out.learning_step as i64,
+            lapsed,
             card_id,
         ],
     )
@@ -400,14 +442,12 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
     tx.execute(
         "INSERT INTO review_log(card_id, rating, state_before, stability, difficulty,
          scheduled_interval, reviewed_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         VALUES(?1, ?2, ?3, NULL, NULL, ?4, ?5)",
         rusqlite::params![
             card_id,
             rating_num(r),
             card.state,
-            out.stability,
-            out.difficulty,
-            (out.due_at - now).num_minutes().to_string(),
+            out.interval_min.to_string(),
             db::fmt_time(now),
         ],
     )
@@ -422,12 +462,11 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
 
 /// SPEC §7.1: skip rates nothing — no review_log row, only a postponed due_at.
 pub fn skip_card(db: &Db, card_id: i64) -> Result<CardDto, String> {
-    let card = db
-        .get_card(card_id)
+    db.get_card(card_id)
         .map_err(|e| e.to_string())?
         .ok_or("卡片不存在")?;
-    let cfg = cfg_from_db(db);
-    let due = scheduler::skip(&to_sched(&card), Utc::now(), &cfg);
+    let skip_delay = get_u32(db, "skip_delay_min", 30).clamp(10, 120);
+    let due = scheduler::skip(Utc::now(), skip_delay);
     db.0.execute(
         "UPDATE card SET due_at=?1 WHERE id=?2",
         rusqlite::params![db::fmt_time(due), card_id],
@@ -439,14 +478,20 @@ pub fn skip_card(db: &Db, card_id: i64) -> Result<CardDto, String> {
         .ok_or_else(|| "card disappeared after skip".into())
 }
 
-pub fn preview_intervals(db: &Db, card_id: i64) -> Result<Vec<Option<f64>>, String> {
+/// Planned intervals per [不了解, 熟悉, 可以讲出来] in minutes.
+pub fn preview_intervals(db: &Db, card_id: i64) -> Result<Vec<u32>, String> {
     let card = db
         .get_card(card_id)
         .map_err(|e| e.to_string())?
         .ok_or("卡片不存在")?;
     let cfg = cfg_from_db(db);
-    let p = scheduler::preview(&to_sched(&card), Utc::now(), &cfg).map_err(|e| e.to_string())?;
-    Ok(p.to_vec())
+    Ok(scheduler::preview(&to_sched(&card), &cfg).to_vec())
+}
+
+/// Record that a card was actually shown (display throttling, design §2).
+pub fn mark_shown(db: &Db, card_id: i64) -> Result<(), String> {
+    db.insert_show_log(card_id, Utc::now())
+        .map_err(|e| e.to_string())
 }
 
 /// Total due count (for tray tooltip, home page and engine tick).
@@ -484,9 +529,12 @@ mod tests {
         let d = db();
         let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
         assert_eq!(dto.state, "new");
-        assert_eq!(dto.learning_step, 0);
         let c = d.get_card(dto.id).unwrap().unwrap();
         assert!(c.due_at <= Utc::now());
+        assert_eq!(
+            c.interval_minutes, None,
+            "new cards have no planned interval"
+        );
     }
 
     #[test]
@@ -499,24 +547,57 @@ mod tests {
     fn rate_persists_review_log() {
         let mut d = db();
         let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
-        let after = rate(&mut d, dto.id, "good").unwrap();
-        // Good on a new card advances to learning step 1 (5 minutes).
-        assert_eq!(after.state, "learning");
-        assert_eq!(after.learning_step, 1);
-        let (n, rating, before): (i64, i64, String) =
+        let after = rate(&mut d, dto.id, "familiar").unwrap();
+        // New + Familiar = 1 day; state flips to review.
+        assert_eq!(after.state, "review");
+        let (n, rating, before, interval): (i64, i64, String, Option<String>) =
             d.0.query_row(
-                "SELECT COUNT(*), rating, state_before FROM review_log GROUP BY id",
+                "SELECT COUNT(*), rating, state_before, scheduled_interval
+                 FROM review_log GROUP BY id",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!((n, rating, before.as_str()), (1, 3, "new"));
-        let due: String =
-            d.0.query_row("SELECT due_at FROM card WHERE id=?1", [dto.id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert!(db::parse_time(&due) > Utc::now());
+        assert_eq!((n, rating, before.as_str()), (1, 2, "new"));
+        assert_eq!(interval.as_deref(), Some("1440"));
+        let c = d.get_card(dto.id).unwrap().unwrap();
+        assert_eq!(c.interval_minutes, Some(1440));
+        let due = c.due_at - Utc::now();
+        assert!(
+            (due.num_minutes() - 1440).abs() < 5,
+            "due should be ~1 day out, got {} min",
+            due.num_minutes()
+        );
+    }
+
+    #[test]
+    fn early_positive_practice_only_logs() {
+        let mut d = db();
+        let dto = add_card(&d, "D", "C", "T", "x").unwrap();
+        rate(&mut d, dto.id, "familiar").unwrap(); // schedule: +1d
+        let due_before = d.get_card(dto.id).unwrap().unwrap().due_at;
+        // Practice the card early (it is days away) with a positive rating.
+        let after = rate(&mut d, dto.id, "speakable").unwrap();
+        assert!(due_before == d.get_card(dto.id).unwrap().unwrap().due_at);
+        assert_eq!(after.state, "review");
+        let (interval, count): (Option<i64>, i64) = (
+            d.get_card(dto.id).unwrap().unwrap().interval_minutes,
+            d.0.query_row("SELECT COUNT(*) FROM review_log", [], |r| r.get(0))
+                .unwrap(),
+        );
+        assert_eq!(
+            interval,
+            Some(1440),
+            "positive practice must not extend the schedule"
+        );
+        assert_eq!(count, 2, "practice is still logged");
+        // But finding out you forgot early applies for real.
+        let after = rate(&mut d, dto.id, "unknown").unwrap();
+        assert_eq!(after.state, "review");
+        assert_eq!(
+            d.get_card(dto.id).unwrap().unwrap().interval_minutes,
+            Some(120)
+        );
     }
 
     #[test]
@@ -531,27 +612,92 @@ mod tests {
         let d = db();
         let a = add_card(&d, "D", "C", "卡A", "x").unwrap();
         let b = add_card(&d, "D", "C", "卡B", "x").unwrap();
-        d.0.execute(
-            "UPDATE card SET due_at=?1 WHERE id=?2",
-            rusqlite::params![
-                db::fmt_time(Utc::now() - chrono::Duration::minutes(10)),
-                a.id
-            ],
-        )
-        .unwrap();
-        d.0.execute(
-            "UPDATE card SET due_at=?1 WHERE id=?2",
-            rusqlite::params![
-                db::fmt_time(Utc::now() - chrono::Duration::minutes(1)),
-                b.id
-            ],
-        )
-        .unwrap();
+        // Both are scheduled review cards, overdue by different amounts.
+        for (id, minutes_ago, interval) in [(a.id, 10, 1440), (b.id, 1, 1440)] {
+            d.0.execute(
+                "UPDATE card SET state='review', interval_minutes=?1, due_at=?2 WHERE id=?3",
+                rusqlite::params![
+                    interval,
+                    db::fmt_time(Utc::now() - chrono::Duration::minutes(minutes_ago)),
+                    id
+                ],
+            )
+            .unwrap();
+        }
         let q = due_queue(&d, 10).unwrap();
         assert_eq!(
             q.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
             ["卡A", "卡B"]
         );
+    }
+
+    #[test]
+    fn new_card_quotas_limit_introduction() {
+        let d = db();
+        add_card(&d, "D", "C", "新1", "x").unwrap();
+        add_card(&d, "D", "C", "新2", "x").unwrap();
+        add_card(&d, "D", "C", "新3", "x").unwrap();
+        // Default session_new_limit = 1: only one new card per session.
+        assert_eq!(due_queue(&d, 10).unwrap().len(), 1);
+        // Two per session when configured.
+        set_settings(&d, &[("session_new_limit".into(), "2".into())]).unwrap();
+        assert_eq!(due_queue(&d, 10).unwrap().len(), 2);
+        // Daily quota caps across sessions: pretend 5 were introduced today.
+        set_settings(&d, &[("session_new_limit".into(), "5".into())]).unwrap();
+        for _ in 0..5 {
+            d.0.execute(
+                "INSERT INTO review_log(card_id, rating, state_before, reviewed_at)
+                 VALUES(1, 2, 'new', ?1)",
+                [db::fmt_time(Utc::now() - chrono::Duration::hours(1))],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            due_queue(&d, 10).unwrap().len(),
+            0,
+            "daily new quota exhausted"
+        );
+    }
+
+    #[test]
+    fn display_throttling_caps_shows_per_card() {
+        let d = db();
+        let a = add_card(&d, "D", "C", "卡A", "x").unwrap();
+        d.0.execute(
+            "UPDATE card SET state='review', interval_minutes=1440, due_at=?1 WHERE id=?2",
+            rusqlite::params![db::fmt_time(Utc::now() - chrono::Duration::hours(1)), a.id],
+        )
+        .unwrap();
+        // Recently shown (within the 120-min gap): excluded.
+        mark_shown(&d, a.id).unwrap();
+        assert!(
+            due_queue(&d, 10).unwrap().is_empty(),
+            "min display gap honored"
+        );
+        // Shown twice long ago (outside gap, within 24h): max_daily_shows=2 reached.
+        d.0.execute("DELETE FROM card_show_log", []).unwrap();
+        for hours_ago in [5, 3] {
+            d.0.execute(
+                "INSERT INTO card_show_log(card_id, shown_at) VALUES(?1, ?2)",
+                rusqlite::params![
+                    a.id,
+                    db::fmt_time(Utc::now() - chrono::Duration::hours(hours_ago))
+                ],
+            )
+            .unwrap();
+        }
+        assert!(
+            due_queue(&d, 10).unwrap().is_empty(),
+            "daily show cap honored"
+        );
+        // Shows older than 24h do not count.
+        d.0.execute("DELETE FROM card_show_log", []).unwrap();
+        d.0.execute(
+            "INSERT INTO card_show_log(card_id, shown_at) VALUES(?1, ?2)",
+            rusqlite::params![a.id, db::fmt_time(Utc::now() - chrono::Duration::hours(25))],
+        )
+        .unwrap();
+        assert_eq!(due_queue(&d, 10).unwrap().len(), 1, "old shows age out");
     }
 
     #[test]
@@ -590,9 +736,11 @@ mod tests {
         let d = db();
         let dto = add_card(&d, "D", "C", "T", "x").unwrap();
         let p = preview_intervals(&d, dto.id).unwrap();
-        assert_eq!(p.len(), 4);
-        assert_eq!(p[0], Some(1.0));
-        assert!(p[3].unwrap() > 1000.0);
+        assert_eq!(
+            p,
+            vec![120, 1440, 1440],
+            "new card: unknown 2h, positives 1d"
+        );
     }
 
     #[test]
@@ -635,7 +783,7 @@ mod tests {
         let dto = add_card(&d, "目标包", "C", "T1", "x").unwrap();
         add_card(&d, "目标包", "C", "T2", "x").unwrap();
         add_card(&d, "保留包", "C", "T3", "x").unwrap();
-        rate(&mut d, dto.id, "good").unwrap(); // review_log row exists
+        rate(&mut d, dto.id, "familiar").unwrap(); // review_log row exists
         delete_deck(&mut d, "目标包").unwrap();
         let cards: i64 =
             d.0.query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))
@@ -758,19 +906,23 @@ mod tests {
     }
 
     #[test]
-    fn empty_steps_setting_enables_intermittent_mode() {
-        let d = db();
+    fn settings_drive_scheduling_config() {
+        let mut d = db();
         let c = add_card(&d, "D", "C", "T", "x").unwrap();
-        // Default 1/5/10: Again previews as one minute.
-        assert_eq!(preview_intervals(&d, c.id).unwrap()[0], Some(1.0));
-        // Empty steps setting: no minute-level re-pops at all.
-        set_settings(&d, &[("steps_min".into(), "".into())]).unwrap();
-        let p = preview_intervals(&d, c.id).unwrap();
-        assert!(
-            p[0].unwrap() > 60.0,
-            "intermittent mode should schedule Again hours out, got {:?}",
-            p[0]
+        // Defaults: unknown 2h, positives 1d.
+        assert_eq!(preview_intervals(&d, c.id).unwrap(), vec![120, 1440, 1440]);
+        // Custom minimum interval flows into the preview.
+        set_settings(&d, &[("min_interval_min".into(), "45".into())]).unwrap();
+        assert_eq!(
+            preview_intervals(&d, c.id).unwrap()[0],
+            60,
+            "45m rounds up to 1h"
         );
+        // Multipliers apply to scheduled cards.
+        rate(&mut d, c.id, "speakable").unwrap(); // 1d
+        let p = preview_intervals(&d, c.id).unwrap();
+        assert_eq!(p[1], 2 * 1440, "familiar: 1d × 1.5 → 2d");
+        assert_eq!(p[2], 3 * 1440, "speakable: 1d × 2.5 → 3d");
     }
 
     #[test]

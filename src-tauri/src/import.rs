@@ -89,6 +89,13 @@ mod tests {
         import(db, &decks, Some("notes.md"), prefer_file).unwrap()
     }
 
+    fn find_card(db: &Db, title: &str) -> crate::db::Card {
+        let id: i64 =
+            db.0.query_row("SELECT id FROM card WHERE title=?1", [title], |r| r.get(0))
+                .unwrap();
+        db.get_card(id).unwrap().unwrap()
+    }
+
     const V1: &str = "# MySQL\n\n## 事务\n\n### ACID\n原子性要点\n\n### 隔离级别\n要点B\n";
     const V2: &str = "# MySQL\n\n## 事务\n\n### ACID\n原子性要点-更新后\n\n### 隔离级别\n要点B\n";
 
@@ -97,12 +104,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let report = import_src(&db, V1, false);
         assert_eq!((report.added, report.updated, report.conflicts), (2, 0, 0));
-        let card = db
-            .list_due(Utc::now(), 10)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.title == "ACID")
-            .unwrap();
+        let card = find_card(&db, "ACID");
         assert_eq!(card.state, "new");
         assert_eq!(card.content_md, "原子性要点");
     }
@@ -138,12 +140,7 @@ mod tests {
         let report = import_src(&db, V2, false);
         assert_eq!(report.conflicts, 1);
         assert_eq!(report.updated, 0);
-        let card = db
-            .list_due(Utc::now(), 10)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.title == "ACID")
-            .unwrap();
+        let card = find_card(&db, "ACID");
         // Local version wins: content unchanged, flag stays set.
         assert_eq!(card.content_md, "原子性要点");
         assert!(card.locally_edited);
@@ -158,12 +155,7 @@ mod tests {
         let report = import_src(&db, V2, true);
         assert_eq!(report.updated, 1);
         assert_eq!(report.conflicts, 0);
-        let card = db
-            .list_due(Utc::now(), 10)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.title == "ACID")
-            .unwrap();
+        let card = find_card(&db, "ACID");
         assert_eq!(card.content_md, "原子性要点-更新后");
         assert!(!card.locally_edited);
     }
@@ -188,12 +180,7 @@ mod tests {
         let src = "# D\n\n## C\n\n### 重复卡\n第一版\n\n### 重复卡\n第二版\n";
         let report = import_src(&db, src, false);
         assert_eq!(report.added, 1);
-        let card = db
-            .list_due(Utc::now(), 10)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let card = find_card(&db, "重复卡");
         assert_eq!(card.content_md, "第二版");
     }
 }

@@ -13,20 +13,18 @@ export function formatInterval(minutes: number | null): string {
   return `${Math.round(minutes / 1440)}天`;
 }
 
-/** SPEC §8.4: space reveals, 1-4 rate, Esc skips. */
+/** SPEC §8.4: space reveals, 1-3 rate (三档), Esc skips. */
 export function mapKeyToRating(key: string): RatingAction | null {
   switch (key) {
     case " ":
     case "Spacebar":
       return "reveal";
     case "1":
-      return "again";
+      return "unknown";
     case "2":
-      return "hard";
+      return "familiar";
     case "3":
-      return "good";
-    case "4":
-      return "easy";
+      return "speakable";
     case "Escape":
       return "skip";
     default:

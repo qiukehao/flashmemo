@@ -1,124 +1,132 @@
-//! Review scheduling per SPEC §7: minute-level learning steps owned by this
-//! module, FSRS-6 (via the `fsrs` crate) owns graduated-card intervals and
-//! memory states (S/D). All intervals crossing the boundary are minutes (f64).
+//! Review scheduling: fixed-multiplier rules with a Familiar cap.
+//!
+//! Redesigned 2026-09-28 (replaces FSRS; design reviewed externally, see
+//! docs/plans/2026-09-28-scheduling-redesign-prompt.md):
+//! - Three self-ratings for spoken recall: Unknown / Familiar / Speakable.
+//! - Unknown → short interval (or daily once the attention threshold is hit).
+//! - Familiar → grows ×1.5 but is capped at the Familiar ceiling.
+//! - Speakable → grows ×2.5 up to the global maximum.
+//!
+//! All intervals are minutes; day-scale intervals are whole days.
 
 use chrono::{DateTime, Duration, Utc};
-use fsrs::{MemoryState, FSRS};
+
+const DAY_MIN: u32 = 1440;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rating {
-    Again,
-    Hard,
-    Good,
-    Easy,
-}
-
-/// Typed card state; the DB layer keeps raw strings, services convert.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardState {
-    New,
-    Learning,
-    Review,
-    Relearning,
+    /// 不了解 — could not recall the main points before revealing the answer.
+    Unknown,
+    /// 熟悉 — recalled the points but could not organize a full answer.
+    Familiar,
+    /// 可以讲出来 — could deliver the answer unaided.
+    Speakable,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScheduleConfig {
-    /// Minute-level learning/relearning steps, SPEC §7.2 default 1m/5m/10m.
-    pub steps_min: Vec<u32>,
-    pub retention: f32,
-    pub skip_delay_min: u32,
+    pub min_interval_min: u32,
+    pub initial_interval_min: u32,
+    pub familiar_mult: f64,
+    pub speak_mult: f64,
+    pub familiar_cap_min: u32,
+    pub max_interval_min: u32,
+    pub attention_threshold: u32,
+    pub attention_interval_min: u32,
 }
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
         ScheduleConfig {
-            steps_min: vec![1, 5, 10],
-            retention: 0.90,
-            skip_delay_min: 30,
+            min_interval_min: 120,      // 2h
+            initial_interval_min: 1440, // 1d
+            familiar_mult: 1.5,
+            speak_mult: 2.5,
+            familiar_cap_min: 10080, // 7d
+            max_interval_min: 86400, // 60d
+            attention_threshold: 3,
+            attention_interval_min: 1440, // 1d
         }
     }
 }
 
-/// Scheduler-facing projection of a card (from `db::Card`).
+/// Scheduler-facing projection of a card. `interval_min: None` means the card
+/// has never been scheduled (new card).
 #[derive(Debug, Clone)]
 pub struct CardSched {
-    pub state: CardState,
-    pub stability: Option<f32>,
-    pub difficulty: Option<f32>,
-    pub learning_step: usize,
-    pub last_review_at: Option<DateTime<Utc>>,
+    pub interval_min: Option<u32>,
+    pub unknown_streak: u32,
+    pub speak_streak: u32,
+    pub needs_attention: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScheduleOutcome {
-    pub state: CardState,
-    pub stability: Option<f32>,
-    pub difficulty: Option<f32>,
-    pub learning_step: usize,
+    pub interval_min: u32,
     pub due_at: DateTime<Utc>,
+    pub unknown_streak: u32,
+    pub speak_streak: u32,
+    pub needs_attention: bool,
 }
 
-fn minutes(days: f32) -> i64 {
-    // Fractional FSRS days -> whole minutes, at least one.
-    ((days * 1440.0).round() as i64).max(1)
-}
-
-fn memory_state(card: &CardSched) -> Option<MemoryState> {
-    Some(MemoryState {
-        stability: card.stability?,
-        difficulty: card.difficulty?,
-    })
-}
-
-fn step_due(steps: &[u32], idx: usize, now: DateTime<Utc>) -> DateTime<Utc> {
-    now + Duration::minutes(steps[idx.min(steps.len() - 1)] as i64)
-}
-
-fn outcome(
-    state: CardState,
-    learning_step: usize,
-    memory: Option<MemoryState>,
-    due_at: DateTime<Utc>,
-) -> ScheduleOutcome {
-    ScheduleOutcome {
-        state,
-        learning_step,
-        stability: memory.map(|m| m.stability),
-        difficulty: memory.map(|m| m.difficulty),
-        due_at,
+/// Round up: below a day to whole hours, a day or more to whole days.
+fn round_up(minutes: f64) -> u32 {
+    if minutes < DAY_MIN as f64 {
+        ((minutes / 60.0).ceil() as u32) * 60
+    } else {
+        ((minutes / DAY_MIN as f64).ceil() as u32) * DAY_MIN
     }
 }
 
-/// Days since the last review, floored — `next_states` works in whole days.
-fn elapsed_days(card: &CardSched, now: DateTime<Utc>) -> u32 {
-    card.last_review_at
-        .map(|t| ((now - t).num_seconds() as f32 / 86_400.0).floor().max(0.0) as u32)
-        .unwrap_or(0)
-}
+/// Interval + counter updates for one rating, without a due date (so `preview`
+/// and `review` share the exact same rules).
+fn next_interval(card: &CardSched, rating: Rating, cfg: &ScheduleConfig) -> (u32, u32, u32, bool) {
+    let mut unknown_streak = card.unknown_streak;
+    let mut speak_streak = card.speak_streak;
+    let mut needs_attention = card.needs_attention;
 
-/// Graduated-card scheduling: FSRS-6 decides interval and the new S/D.
-fn fsrs_outcome(
-    card: &CardSched,
-    rating: Rating,
-    now: DateTime<Utc>,
-    cfg: &ScheduleConfig,
-    days_elapsed: u32,
-) -> fsrs::Result<ScheduleOutcome> {
-    let fsrs = FSRS::new(&[])?;
-    let states = fsrs.next_states(memory_state(card), cfg.retention, days_elapsed)?;
-    let item = match rating {
-        Rating::Again => &states.again,
-        Rating::Hard => &states.hard,
-        Rating::Good => &states.good,
-        Rating::Easy => &states.easy,
+    let raw: f64 = match rating {
+        Rating::Unknown => {
+            unknown_streak += 1;
+            speak_streak = 0;
+            if unknown_streak >= cfg.attention_threshold {
+                // Not a memory problem to be fixed by popups: slow down to
+                // daily and surface the card as "needs deliberate re-learning".
+                needs_attention = true;
+                cfg.attention_interval_min as f64
+            } else {
+                cfg.min_interval_min as f64
+            }
+        }
+        Rating::Familiar => {
+            unknown_streak = 0;
+            speak_streak = 0;
+            // Familiar does NOT clear the attention flag (design §1 note).
+            match card.interval_min {
+                None => cfg.initial_interval_min as f64,
+                Some(i) => (i as f64 * cfg.familiar_mult)
+                    .min(cfg.familiar_cap_min as f64)
+                    .max(cfg.initial_interval_min as f64),
+            }
+        }
+        Rating::Speakable => {
+            unknown_streak = 0;
+            speak_streak += 1;
+            needs_attention = false;
+            match card.interval_min {
+                None => cfg.initial_interval_min as f64,
+                Some(i) => (i as f64 * cfg.speak_mult).max(cfg.initial_interval_min as f64),
+            }
+        }
     };
-    Ok(outcome(
-        CardState::Review,
-        0,
-        Some(item.memory),
-        now + Duration::minutes(minutes(item.interval)),
-    ))
+
+    let mut interval = round_up(raw).clamp(cfg.min_interval_min, cfg.max_interval_min);
+    if rating == Rating::Familiar {
+        // The Familiar ceiling overrides the generic max.
+        interval = interval.min(cfg.familiar_cap_min);
+    }
+    interval = interval.max(cfg.min_interval_min);
+    (interval, unknown_streak, speak_streak, needs_attention)
 }
 
 pub fn review(
@@ -126,134 +134,31 @@ pub fn review(
     rating: Rating,
     now: DateTime<Utc>,
     cfg: &ScheduleConfig,
-) -> fsrs::Result<ScheduleOutcome> {
-    let steps = &cfg.steps_min;
-    // Empty learning steps = intermittent mode: no minute-level re-pops at all,
-    // every rating (including Again) goes straight to an FSRS interval.
-    if steps.is_empty() {
-        return fsrs_outcome(card, rating, now, cfg, elapsed_days(card, now));
-    }
-    let last = steps.len().saturating_sub(1);
-    match card.state {
-        CardState::Review => match rating {
-            // SPEC §7.3: lapse -> relearn steps, stability drops via FSRS Again.
-            Rating::Again => {
-                let fsrs = FSRS::new(&[])?;
-                let states =
-                    fsrs.next_states(memory_state(card), cfg.retention, elapsed_days(card, now))?;
-                Ok(outcome(
-                    CardState::Relearning,
-                    0,
-                    Some(states.again.memory),
-                    step_due(steps, 0, now),
-                ))
-            }
-            _ => fsrs_outcome(card, rating, now, cfg, elapsed_days(card, now)),
-        },
-        // New / Learning / Relearning walk the minute-level steps (SPEC §7.2).
-        _ => match rating {
-            Rating::Again => Ok(outcome(
-                if card.state == CardState::Relearning {
-                    CardState::Relearning
-                } else {
-                    CardState::Learning
-                },
-                0,
-                memory_state(card),
-                step_due(steps, 0, now),
-            )),
-            Rating::Hard => {
-                // First rating on a new card: Hard counts as entering step 2.
-                let idx = if card.state == CardState::New {
-                    1.min(last)
-                } else {
-                    card.learning_step.min(last)
-                };
-                Ok(outcome(
-                    CardState::Learning,
-                    idx,
-                    memory_state(card),
-                    step_due(steps, idx, now),
-                ))
-            }
-            Rating::Good => {
-                if card.learning_step >= last {
-                    fsrs_outcome(card, Rating::Good, now, cfg, 0)
-                } else {
-                    let idx = card.learning_step + 1;
-                    Ok(outcome(
-                        CardState::Learning,
-                        idx,
-                        memory_state(card),
-                        step_due(steps, idx, now),
-                    ))
-                }
-            }
-            Rating::Easy => fsrs_outcome(card, Rating::Easy, now, cfg, 0),
-        },
+) -> ScheduleOutcome {
+    let (interval_min, unknown_streak, speak_streak, needs_attention) =
+        next_interval(card, rating, cfg);
+    ScheduleOutcome {
+        interval_min,
+        due_at: now + Duration::minutes(interval_min as i64),
+        unknown_streak,
+        speak_streak,
+        needs_attention,
     }
 }
 
-pub fn skip(_card: &CardSched, now: DateTime<Utc>, cfg: &ScheduleConfig) -> DateTime<Utc> {
-    now + Duration::minutes(cfg.skip_delay_min as i64)
+/// Planned interval in minutes per [Unknown, Familiar, Speakable].
+pub fn preview(card: &CardSched, cfg: &ScheduleConfig) -> [u32; 3] {
+    [
+        next_interval(card, Rating::Unknown, cfg).0,
+        next_interval(card, Rating::Familiar, cfg).0,
+        next_interval(card, Rating::Speakable, cfg).0,
+    ]
 }
 
-pub fn preview(
-    card: &CardSched,
-    now: DateTime<Utc>,
-    cfg: &ScheduleConfig,
-) -> fsrs::Result<[Option<f64>; 4]> {
-    let steps = &cfg.steps_min;
-    let last = steps.len().saturating_sub(1);
-    let m = |min: i64| Some(min as f64);
-    // Intermittent mode: every rating is scheduled by FSRS directly.
-    if steps.is_empty() {
-        let fsrs = FSRS::new(&[])?;
-        let states =
-            fsrs.next_states(memory_state(card), cfg.retention, elapsed_days(card, now))?;
-        return Ok([
-            Some(minutes(states.again.interval) as f64),
-            Some(minutes(states.hard.interval) as f64),
-            Some(minutes(states.good.interval) as f64),
-            Some(minutes(states.easy.interval) as f64),
-        ]);
-    }
-    if card.state == CardState::Review {
-        let fsrs = FSRS::new(&[])?;
-        let states =
-            fsrs.next_states(memory_state(card), cfg.retention, elapsed_days(card, now))?;
-        return Ok([
-            m(steps[0] as i64),
-            Some(minutes(states.hard.interval) as f64),
-            Some(minutes(states.good.interval) as f64),
-            Some(minutes(states.easy.interval) as f64),
-        ]);
-    }
-    // Learning-phase previews (SPEC §7.5).
-    let again = steps[0] as i64;
-    let hard = if card.state == CardState::New {
-        steps[1.min(last)] as i64
-    } else {
-        steps[card.learning_step.min(last)] as i64
-    };
-    let good = if card.learning_step >= last {
-        // Graduation preview: ask FSRS for the Good interval.
-        let fsrs = FSRS::new(&[])?;
-        Some(minutes(
-            fsrs.next_states(memory_state(card), cfg.retention, 0)?
-                .good
-                .interval,
-        ) as f64)
-    } else {
-        Some(steps[card.learning_step + 1] as f64)
-    };
-    let fsrs = FSRS::new(&[])?;
-    let easy = minutes(
-        fsrs.next_states(memory_state(card), cfg.retention, 0)?
-            .easy
-            .interval,
-    ) as f64;
-    Ok([m(again), m(hard), good, Some(easy)])
+/// SPEC §7.1: skipping rates nothing — the card re-enters the queue later with
+/// every field untouched.
+pub fn skip(now: DateTime<Utc>, skip_delay_min: u32) -> DateTime<Utc> {
+    now + Duration::minutes(skip_delay_min as i64)
 }
 
 #[cfg(test)]
@@ -266,245 +171,191 @@ mod tests {
 
     fn new_card() -> CardSched {
         CardSched {
-            state: CardState::New,
-            stability: None,
-            difficulty: None,
-            learning_step: 0,
-            last_review_at: None,
+            interval_min: None,
+            unknown_streak: 0,
+            speak_streak: 0,
+            needs_attention: false,
         }
     }
 
-    fn days(out: &ScheduleOutcome, now: DateTime<Utc>) -> f64 {
-        (out.due_at - now).num_seconds() as f64 / 86_400.0
-    }
-
-    #[test]
-    fn new_again_goes_step0_1min() {
-        let now = Utc::now();
-        let out = review(&new_card(), Rating::Again, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Learning);
-        assert_eq!(out.learning_step, 0);
-        assert_eq!((out.due_at - now).num_minutes(), 1);
-    }
-
-    #[test]
-    fn new_hard_enters_step2() {
-        let now = Utc::now();
-        let out = review(&new_card(), Rating::Hard, now, &cfg()).unwrap();
-        assert_eq!(out.learning_step, 1);
-        assert_eq!((out.due_at - now).num_minutes(), 5);
-        assert_eq!(out.state, CardState::Learning);
-    }
-
-    #[test]
-    fn learning_hard_stays_put() {
-        let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Learning,
-            learning_step: 2,
+    fn card_at(interval_min: u32) -> CardSched {
+        CardSched {
+            interval_min: Some(interval_min),
             ..new_card()
-        };
-        let out = review(&card, Rating::Hard, now, &cfg()).unwrap();
-        assert_eq!(out.learning_step, 2);
-        assert_eq!((out.due_at - now).num_minutes(), 10);
-    }
-
-    #[test]
-    fn learning_good_advances() {
-        let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Learning,
-            learning_step: 0,
-            ..new_card()
-        };
-        let out = review(&card, Rating::Good, now, &cfg()).unwrap();
-        assert_eq!(out.learning_step, 1);
-        assert_eq!((out.due_at - now).num_minutes(), 5);
-        assert_eq!(out.state, CardState::Learning);
-    }
-
-    #[test]
-    fn good_on_last_step_graduates() {
-        let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Learning,
-            learning_step: 2, // last of [1,5,10]
-            ..new_card()
-        };
-        let out = review(&card, Rating::Good, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Review);
-        assert!(out.stability.is_some());
-        let d = days(&out, now);
-        assert!(
-            (1.0..=7.0).contains(&d),
-            "graduation interval {d} not in 1..=7d"
-        );
-    }
-
-    #[test]
-    fn new_easy_graduates() {
-        let now = Utc::now();
-        let out = review(&new_card(), Rating::Easy, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Review);
-        let d = days(&out, now);
-        assert!(
-            (2.0..=20.0).contains(&d),
-            "easy graduation {d} not in 2..=20d"
-        );
-    }
-
-    #[test]
-    fn empty_steps_send_new_cards_straight_to_fsrs() {
-        let now = Utc::now();
-        let intermittent = ScheduleConfig {
-            steps_min: vec![],
-            ..ScheduleConfig::default()
-        };
-        // Even Again leaves the minute-level phase: everything is FSRS-scheduled.
-        for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy] {
-            let out = review(&new_card(), rating, now, &intermittent).unwrap();
-            assert_eq!(out.state, CardState::Review, "{rating:?} should graduate");
-            assert!(out.due_at > now, "{rating:?} due must be in the future");
-            assert!(out.stability.is_some());
         }
-        let again = review(&new_card(), Rating::Again, now, &intermittent).unwrap();
-        let good = review(&new_card(), Rating::Good, now, &intermittent).unwrap();
-        assert!(again.due_at < good.due_at, "Again sooner than Good");
     }
 
     #[test]
-    fn empty_steps_review_again_skips_relearning() {
+    fn new_card_rules_match_design_table() {
         let now = Utc::now();
-        let intermittent = ScheduleConfig {
-            steps_min: vec![],
-            ..ScheduleConfig::default()
-        };
-        let card = CardSched {
-            state: CardState::Review,
-            stability: Some(5.0),
-            difficulty: Some(4.0),
-            learning_step: 0,
-            last_review_at: Some(now - Duration::days(5)),
-        };
-        let out = review(&card, Rating::Again, now, &intermittent).unwrap();
+        let c = cfg();
+        let unknown = review(&new_card(), Rating::Unknown, now, &c);
+        assert_eq!(unknown.interval_min, 120, "new + Unknown = 2h");
+        assert_eq!(unknown.unknown_streak, 1);
+        let familiar = review(&new_card(), Rating::Familiar, now, &c);
+        assert_eq!(familiar.interval_min, 1440, "new + Familiar = 1d");
+        let speakable = review(&new_card(), Rating::Speakable, now, &c);
         assert_eq!(
-            out.state,
-            CardState::Review,
-            "no relearning phase without steps"
+            speakable.interval_min, 1440,
+            "new + Speakable = 1d (cross-day confirm)"
         );
-        assert!(out.due_at > now);
-        assert!(out.stability.unwrap() < 5.0, "lapse still drops stability");
+        assert_eq!(speakable.speak_streak, 1);
     }
 
     #[test]
-    fn empty_steps_preview_never_panics() {
+    fn unknown_streak_marks_attention_at_threshold() {
         let now = Utc::now();
-        let intermittent = ScheduleConfig {
-            steps_min: vec![],
-            ..ScheduleConfig::default()
+        let c = cfg();
+        let mut card = new_card();
+        // 1st and 2nd Unknown: still the short interval.
+        for streak in 1..=2u32 {
+            let out = review(&card, Rating::Unknown, now, &c);
+            assert_eq!(out.interval_min, 120, "streak {streak}");
+            assert!(!out.needs_attention);
+            card = CardSched {
+                interval_min: Some(out.interval_min),
+                unknown_streak: out.unknown_streak,
+                speak_streak: out.speak_streak,
+                needs_attention: out.needs_attention,
+            };
+        }
+        // 3rd: switch to daily + attention flag, and stay there.
+        let out = review(&card, Rating::Unknown, now, &c);
+        assert_eq!(out.unknown_streak, 3);
+        assert_eq!(out.interval_min, 1440, "3rd Unknown slows to 1d");
+        assert!(out.needs_attention);
+        let again = review(
+            &CardSched {
+                interval_min: Some(out.interval_min),
+                unknown_streak: out.unknown_streak,
+                speak_streak: out.speak_streak,
+                needs_attention: out.needs_attention,
+            },
+            Rating::Unknown,
+            now,
+            &c,
+        );
+        assert_eq!(again.interval_min, 1440, "stays daily afterwards");
+    }
+
+    #[test]
+    fn familiar_growth_is_capped() {
+        let now = Utc::now();
+        let c = cfg();
+        // 1d → (1.5d→2d) → 3d → 5d → 7d (cap)
+        let expected = [2 * DAY_MIN, 3 * DAY_MIN, 5 * DAY_MIN, 7 * DAY_MIN];
+        let mut interval = DAY_MIN;
+        for want in expected {
+            let out = review(&card_at(interval), Rating::Familiar, now, &c);
+            assert_eq!(out.interval_min, want, "from {interval} min");
+            interval = out.interval_min;
+        }
+        // A long-interval card rated Familiar falls back to the cap.
+        let out = review(&card_at(30 * DAY_MIN), Rating::Familiar, now, &c);
+        assert_eq!(out.interval_min, 7 * DAY_MIN);
+        // Familiar never clears the attention flag.
+        let flagged = CardSched {
+            needs_attention: true,
+            ..card_at(DAY_MIN)
         };
-        let p = preview(&new_card(), now, &intermittent).unwrap();
-        assert!(p.iter().all(|x| x.is_some()));
-        assert!(p[0].unwrap() < p[1].unwrap());
-        assert!(p[1].unwrap() < p[2].unwrap());
-        assert!(p[2].unwrap() < p[3].unwrap());
+        assert!(review(&flagged, Rating::Familiar, now, &c).needs_attention);
     }
 
     #[test]
-    fn review_again_enters_relearning() {
+    fn speakable_growth_reaches_max_and_clamps() {
         let now = Utc::now();
+        let c = cfg();
+        // 1d → 3d → 8d → 20d → 50d → 60d (clamp)
+        let expected = [
+            3 * DAY_MIN,
+            8 * DAY_MIN,
+            20 * DAY_MIN,
+            50 * DAY_MIN,
+            60 * DAY_MIN,
+        ];
+        let mut interval = DAY_MIN;
+        for want in expected {
+            let out = review(&card_at(interval), Rating::Speakable, now, &c);
+            assert_eq!(out.interval_min, want, "from {interval} min");
+            interval = out.interval_min;
+        }
+        // Already at max: stays at max.
+        let out = review(&card_at(60 * DAY_MIN), Rating::Speakable, now, &c);
+        assert_eq!(out.interval_min, 60 * DAY_MIN);
+    }
+
+    #[test]
+    fn speakable_clears_attention_and_resets_unknown_streak() {
+        let now = Utc::now();
+        let c = cfg();
+        let flagged = CardSched {
+            interval_min: Some(DAY_MIN),
+            unknown_streak: 3,
+            speak_streak: 0,
+            needs_attention: true,
+        };
+        let out = review(&flagged, Rating::Speakable, now, &c);
+        assert!(!out.needs_attention);
+        assert_eq!(out.unknown_streak, 0);
+        assert_eq!(out.speak_streak, 1);
+    }
+
+    #[test]
+    fn familiar_resets_streaks_both_ways() {
+        let now = Utc::now();
+        let c = cfg();
         let card = CardSched {
-            state: CardState::Review,
-            stability: Some(5.0),
-            difficulty: Some(4.0),
-            learning_step: 0,
-            last_review_at: Some(now - Duration::days(5)),
+            interval_min: Some(DAY_MIN),
+            unknown_streak: 2,
+            speak_streak: 3,
+            needs_attention: false,
         };
-        let out = review(&card, Rating::Again, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Relearning);
-        assert_eq!(out.learning_step, 0);
-        assert_eq!((out.due_at - now).num_minutes(), 1);
-        // SPEC §7.3: a lapse must drop stability substantially.
-        assert!(out.stability.unwrap() < 5.0);
+        let out = review(&card, Rating::Familiar, now, &c);
+        assert_eq!((out.unknown_streak, out.speak_streak), (0, 0));
     }
 
     #[test]
-    fn relearning_good_graduates_back_to_review() {
+    fn intervals_respect_configured_bounds() {
         let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Relearning,
-            stability: Some(0.4),
-            difficulty: Some(6.0),
-            learning_step: 2,
-            last_review_at: Some(now - Duration::minutes(30)),
-        };
-        let out = review(&card, Rating::Good, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Review);
-        assert!(out.due_at > now, "graduation due must be in the future");
-        assert!(out.stability.is_some());
+        let mut c = cfg();
+        c.min_interval_min = 30;
+        // Familiar has a floor at the 1-day confirm interval (design formula).
+        let out = review(&card_at(60), Rating::Familiar, now, &c);
+        assert_eq!(
+            out.interval_min, 1440,
+            "Familiar never dips below the 1-day confirm interval"
+        );
+        // Custom tiny max clamps.
+        c.max_interval_min = 200;
+        let out = review(&card_at(DAY_MIN), Rating::Speakable, now, &c);
+        assert_eq!(out.interval_min, 200);
     }
 
     #[test]
-    fn review_good_schedules_by_fsrs() {
-        let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Review,
-            stability: Some(3.0),
-            difficulty: Some(5.0),
-            learning_step: 0,
-            last_review_at: Some(now - Duration::days(3)),
+    fn preview_lists_three_intervals_and_never_panics() {
+        let c = cfg();
+        let p = preview(&new_card(), &c);
+        assert_eq!(
+            p,
+            [120, 1440, 1440],
+            "new card: unknown 2h, both positives 1d"
+        );
+        let p = preview(&card_at(DAY_MIN), &c);
+        assert_eq!(p, [120, 2 * DAY_MIN, 3 * DAY_MIN]);
+        // A card already on a 2-long Unknown streak previews the daily drop.
+        let flagged = CardSched {
+            interval_min: Some(DAY_MIN),
+            unknown_streak: 2,
+            speak_streak: 0,
+            needs_attention: false,
         };
-        let out = review(&card, Rating::Good, now, &cfg()).unwrap();
-        assert_eq!(out.state, CardState::Review);
-        let d = days(&out, now);
-        assert!(d > 1.0, "review Good interval {d} should exceed a day");
-        assert!(out.due_at > now);
+        assert_eq!(preview(&flagged, &c)[0], 1440);
     }
 
     #[test]
-    fn skip_adds_30min_and_keeps_state() {
+    fn skip_postpones_without_touching_the_card() {
         let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Review,
-            stability: Some(5.0),
-            difficulty: Some(4.0),
-            learning_step: 0,
-            last_review_at: Some(now - Duration::days(5)),
-        };
-        let due = skip(&card, now, &cfg());
+        let due = skip(now, 30);
         assert_eq!((due - now).num_minutes(), 30);
-    }
-
-    #[test]
-    fn preview_learning_shows_minute_steps() {
-        let now = Utc::now();
-        let p = preview(&new_card(), now, &cfg()).unwrap();
-        assert_eq!(p[0], Some(1.0), "again preview = first step");
-        assert_eq!(p[1], Some(5.0), "hard preview = step 2 for a new card");
-        assert_eq!(p[2], Some(5.0), "good preview = next step");
-        let easy = p[3].unwrap();
-        assert!(easy > 1000.0, "easy preview should be days-scale minutes");
-    }
-
-    #[test]
-    fn preview_graduated_returns_four_intervals() {
-        let now = Utc::now();
-        let card = CardSched {
-            state: CardState::Review,
-            stability: Some(5.0),
-            difficulty: Some(5.0),
-            learning_step: 0,
-            last_review_at: Some(now - Duration::days(4)),
-        };
-        let p = preview(&card, now, &cfg()).unwrap();
-        assert_eq!(p[0], Some(1.0), "again preview = relearn first step");
-        assert!(
-            p[1].unwrap() < p[2].unwrap(),
-            "hard interval < good interval"
-        );
-        assert!(
-            p[2].unwrap() < p[3].unwrap(),
-            "good interval < easy interval"
-        );
     }
 }

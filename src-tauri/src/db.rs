@@ -38,6 +38,12 @@ pub struct Card {
     pub locally_edited: bool,
     pub learning_step: i64,
     pub source_file: Option<String>,
+    /// Fixed-multiplier scheduler state (migration v2): planned interval in
+    /// minutes; None = never scheduled (new card).
+    pub interval_minutes: Option<i64>,
+    pub unknown_streak: i64,
+    pub speak_streak: i64,
+    pub needs_attention: bool,
 }
 
 pub fn fmt_time(t: DateTime<Utc>) -> String {
@@ -119,6 +125,30 @@ CREATE INDEX idx_card_state ON card(state);
 CREATE INDEX idx_review_log_card ON review_log(card_id);
 "#;
 
+/// v2 (2026-09-28): fixed-multiplier scheduler state + display throttling log.
+/// Existing FSRS-era cards keep their planned interval (derived from due_at and
+/// last_review_at) so no card loses its place in the queue.
+const SCHEMA_V2: &str = r#"
+ALTER TABLE card ADD COLUMN interval_minutes INTEGER;
+ALTER TABLE card ADD COLUMN unknown_streak INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card ADD COLUMN speak_streak INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE card_show_log (
+  id INTEGER PRIMARY KEY,
+  card_id INTEGER NOT NULL REFERENCES card(id) ON DELETE CASCADE,
+  shown_at TEXT NOT NULL
+);
+CREATE INDEX idx_show_log_card ON card_show_log(card_id, shown_at);
+
+UPDATE card
+   SET interval_minutes =
+       CAST(MAX(1, ROUND((julianday(due_at) - julianday(last_review_at)) * 1440)) AS INTEGER)
+ WHERE last_review_at IS NOT NULL AND interval_minutes IS NULL;
+
+UPDATE card SET state = 'review' WHERE state IN ('learning', 'relearning');
+"#;
+
 impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Db> {
         if let Some(parent) = path.parent() {
@@ -143,6 +173,11 @@ impl Db {
         if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
             conn.pragma_update(None, "user_version", 1)?;
+        }
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            conn.execute_batch(SCHEMA_V2)?;
+            conn.pragma_update(None, "user_version", 2)?;
         }
         Ok(())
     }
@@ -254,13 +289,18 @@ impl Db {
             locally_edited: row.get::<_, i64>("locally_edited")? != 0,
             learning_step: row.get("learning_step")?,
             source_file: row.get("source_file")?,
+            interval_minutes: row.get("interval_minutes")?,
+            unknown_streak: row.get("unknown_streak")?,
+            speak_streak: row.get("speak_streak")?,
+            needs_attention: row.get::<_, i64>("needs_attention")? != 0,
         })
     }
 
     const CARD_SELECT: &str =
         "SELECT c.id, d.name AS deck, ch.name AS chapter, c.title, c.content_md,
         c.state, c.stability, c.difficulty, c.due_at, c.last_review_at, c.reps, c.lapses,
-        c.leech, c.locally_edited, c.learning_step, c.source_file
+        c.leech, c.locally_edited, c.learning_step, c.source_file,
+        c.interval_minutes, c.unknown_streak, c.speak_streak, c.needs_attention
         FROM card c JOIN deck d ON d.id = c.deck_id JOIN chapter ch ON ch.id = c.chapter_id";
 
     pub fn get_card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
@@ -273,17 +313,89 @@ impl Db {
         }
     }
 
-    /// Cards whose `due_at` has passed, oldest due first, excluding
-    /// suspended/archived (SPEC §7.6 queue ordering, §12.2 archive semantics).
-    pub fn list_due(&self, now: DateTime<Utc>, limit: i64) -> rusqlite::Result<Vec<Card>> {
+    /// Display-throttling filter shared by the popup queue queries: not shown
+    /// within `gap_cutoff` and fewer than `max_shows` shows in the window since
+    /// `day_cutoff` (SPEC §7 展示限流). `gap_param`/`day_param`/`max_param` are
+    /// the positional parameter indexes of the three bindings.
+    fn eligible_shows(gap_param: usize, day_param: usize, max_param: usize) -> String {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM card_show_log s
+                          WHERE s.card_id = c.id AND s.shown_at > ?{gap_param})
+             AND (SELECT COUNT(*) FROM card_show_log s2
+                   WHERE s2.card_id = c.id AND s2.shown_at > ?{day_param}) < ?{max_param}"
+        )
+    }
+
+    /// Due, already-scheduled cards for a popup session: oldest due first,
+    /// display-capped, newest-introduced excluded (those go through
+    /// `new_cards_eligible`).
+    pub fn due_review_cards(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+        gap_cutoff: DateTime<Utc>,
+        day_cutoff: DateTime<Utc>,
+        max_shows: i64,
+    ) -> rusqlite::Result<Vec<Card>> {
         let sql = format!(
-            "{} WHERE c.due_at <= ?1 AND c.state NOT IN ('suspended', 'archived')
-             ORDER BY c.due_at ASC LIMIT ?2",
-            Self::CARD_SELECT
+            "{} WHERE c.state NOT IN ('new', 'suspended', 'archived')
+             AND c.due_at <= ?1 AND {}
+             ORDER BY c.due_at ASC LIMIT ?5",
+            Self::CARD_SELECT,
+            Self::eligible_shows(2, 3, 4)
         );
         let mut stmt = self.0.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![fmt_time(now), limit], Self::row_to_card)?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                fmt_time(now),
+                fmt_time(gap_cutoff),
+                fmt_time(day_cutoff),
+                max_shows,
+                limit
+            ],
+            Self::row_to_card,
+        )?;
         rows.collect()
+    }
+
+    /// Brand-new cards for a popup session, oldest id first, display-capped.
+    pub fn new_cards_eligible(
+        &self,
+        limit: i64,
+        gap_cutoff: DateTime<Utc>,
+        day_cutoff: DateTime<Utc>,
+        max_shows: i64,
+    ) -> rusqlite::Result<Vec<Card>> {
+        let sql = format!(
+            "{} WHERE c.state = 'new' AND {}
+             ORDER BY c.id ASC LIMIT ?4",
+            Self::CARD_SELECT,
+            Self::eligible_shows(1, 2, 3)
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![fmt_time(gap_cutoff), fmt_time(day_cutoff), max_shows, limit],
+            Self::row_to_card,
+        )?;
+        rows.collect()
+    }
+
+    /// How many cards were introduced (first-ever rating) since `cutoff` — the
+    /// daily new-card quota (SPEC §7 队列规则).
+    pub fn new_introduced_since(&self, cutoff: DateTime<Utc>) -> rusqlite::Result<i64> {
+        self.0.query_row(
+            "SELECT COUNT(*) FROM review_log WHERE state_before = 'new' AND reviewed_at > ?1",
+            [fmt_time(cutoff)],
+            |r| r.get(0),
+        )
+    }
+
+    pub fn insert_show_log(&self, card_id: i64, at: DateTime<Utc>) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO card_show_log(card_id, shown_at) VALUES(?1, ?2)",
+            rusqlite::params![card_id, fmt_time(at)],
+        )?;
+        Ok(())
     }
 
     pub fn find_card_in_chapter(
@@ -516,11 +628,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_list_due() {
+    fn insert_and_read_back() {
         let d = db();
         let now = Utc::now();
         let past = now - chrono::Duration::minutes(5);
-        let future = now + chrono::Duration::hours(1);
 
         let a = d
             .insert_card(
@@ -543,7 +654,7 @@ mod tests {
                     content_md: "".into(),
                     source_file: None,
                 },
-                future,
+                past,
             )
             .unwrap();
         assert_ne!(a, b);
@@ -560,15 +671,41 @@ mod tests {
         assert_eq!(card.deck, "MySQL");
         assert_eq!(card.chapter, "事务");
         assert!(!card.locally_edited);
+        assert_eq!(card.interval_minutes, None);
 
-        // Only the overdue card shows up, oldest due first.
-        let due = d.list_due(now, 10).unwrap();
-        assert_eq!(due.len(), 1);
+        // Scheduled (non-new) cards: overdue ones come back oldest first.
+        for (id, minutes_ago) in [(a, 10), (b, 1)] {
+            d.0.execute(
+                "UPDATE card SET state='review', interval_minutes=1440, due_at=?1 WHERE id=?2",
+                rusqlite::params![fmt_time(now - chrono::Duration::minutes(minutes_ago)), id],
+            )
+            .unwrap();
+        }
+        let due = d
+            .due_review_cards(
+                now,
+                10,
+                now - chrono::Duration::hours(2),
+                now - chrono::Duration::hours(24),
+                2,
+            )
+            .unwrap();
+        assert_eq!(due.len(), 2);
         assert_eq!(due[0].title, "卡A");
 
         // Archived cards never re-enter the queue.
         d.0.execute("UPDATE card SET state='archived' WHERE id=?1", [a])
             .unwrap();
-        assert!(d.list_due(now, 10).unwrap().is_empty());
+        let due = d
+            .due_review_cards(
+                now,
+                10,
+                now - chrono::Duration::hours(2),
+                now - chrono::Duration::hours(24),
+                2,
+            )
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].title, "卡B");
     }
 }

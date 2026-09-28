@@ -8,7 +8,7 @@ export interface CardDto {
   contentMd: string;
   state: string;
   dueAt: string;
-  learningStep: number;
+  needsAttention: boolean;
 }
 
 export interface ImportFile {
@@ -38,7 +38,8 @@ export interface DeckOverview {
   dueCount: number;
 }
 
-export type RatingName = "again" | "hard" | "good" | "easy";
+/** SPEC §7 三档口述评分. */
+export type RatingName = "unknown" | "familiar" | "speakable";
 
 export const api = {
   importMarkdown: (files: ImportFile[], preferFile: boolean) =>
@@ -64,7 +65,8 @@ export const api = {
     invoke<CardDto>("rate_card", { cardId, rating }),
   skipCard: (cardId: number) => invoke<CardDto>("skip_card", { cardId }),
   previewIntervals: (cardId: number) =>
-    invoke<(number | null)[]>("preview_intervals", { cardId }),
+    invoke<number[]>("preview_intervals", { cardId }),
+  markShown: (cardId: number) => invoke<void>("mark_card_shown", { cardId }),
   dueCount: () => invoke<number>("due_count"),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>

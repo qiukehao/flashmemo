@@ -239,6 +239,7 @@ export default function DecksPage() {
           {showDeck && <small className="muted"> {c.deck} · {c.chapter}</small>}
         </span>
         <span className="muted small">
+          {c.needsAttention && <span className="attention-tag">⚠ 需专项理解 </span>}
           {STATE_LABEL[c.state] ?? c.state} · {fmtDue(c.dueAt)}
         </span>
         <span className="deck-actions">
