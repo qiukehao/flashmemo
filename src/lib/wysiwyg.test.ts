@@ -64,6 +64,15 @@ describe("htmlToMarkdown (WYSIWYG save path)", () => {
     expect(out).toContain("> [!note] ✏️ 面试回答");
     expect(out).toContain("> **要点**：内容");
   });
+
+  it("keeps adjacent callouts separate (user's card layout)", () => {
+    const md = "> [!note] 傻瓜讲解\n> 正文一\n\n> [!NOTE] 面试回答\n>\n> **正文二**";
+    const out = roundTrip(md);
+    expect((out.match(/> \[!note\]/g) ?? []).length).toBe(2);
+    expect(out).toContain("> [!note] 傻瓜讲解");
+    expect(out).toContain("> [!note] 面试回答");
+    expect(out).toContain("> **正文二**");
+  });
 });
 
 describe("wrapSelection / insertNoteBlock (editor DOM)", () => {
