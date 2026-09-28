@@ -2,14 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardDto, type RatingName } from "../lib/api";
 import { isTextEntryTarget } from "../lib/dom";
+import { isTauri } from "../lib/env";
 import { formatGap, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
 import { htmlToMarkdown, insertNoteBlock, wrapSelection } from "../lib/wysiwyg";
 
-const appWindow = getCurrentWebviewWindow();
+const appWindow = isTauri() ? getCurrentWebviewWindow() : null;
 
 function closeWindow() {
-  appWindow.close().catch(() => {});
+  if (appWindow) appWindow.close().catch(() => {});
+  else console.info("[mock] 关闭弹窗（浏览器调试模式）");
 }
 
 const RATINGS: { name: RatingName; label: string; idx: number }[] = [
@@ -74,16 +76,18 @@ export default function ReviewPopup() {
     }
   }, [card, hintCount]);
 
-  // (Re)write the editor DOM only when the card changes — never on save, so
-  // the caret survives autosaves.
+  // (Re)write the editor DOM when the card changes OR when the editor first
+  // mounts (reveal toggles it into existence) — never on save, so the caret
+  // survives autosaves.
   useEffect(() => {
+    if (!revealed) return;
     const el = editorRef.current;
     if (!el || !card) return;
     el.innerHTML = renderCard(card.contentMd);
     savedSnapshot.current = card.contentMd;
     setSaveState("idle");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [card?.id]);
+  }, [card?.id, revealed]);
 
   /** Serialize the edited DOM back to markdown and persist if it changed. */
   const flushEditor = useCallback(async () => {

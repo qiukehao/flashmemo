@@ -1,6 +1,9 @@
 import MarkdownIt from "markdown-it";
 import mark from "markdown-it-mark";
-import highlightjs from "markdown-it-highlightjs";
+// The plugin's default entry imports the full highlight.js (~1MB); the `core`
+// entry takes an instance instead, so we pass the common-language subset.
+import highlightjs from "markdown-it-highlightjs/core";
+import hljs from "highlight.js/lib/common";
 import type { PluginSimple } from "markdown-it";
 
 /**
@@ -38,7 +41,7 @@ const cardRemark: PluginSimple = (md) => {
 const md = new MarkdownIt({ html: false, linkify: false, breaks: false });
 md.use(mark);
 md.use(cardRemark);
-md.use(highlightjs, { inline: false, auto: true, code: true });
+md.use(highlightjs, { inline: false, auto: true, code: true, hljs });
 
 /** Render card back markdown: GFM basics + ==highlight== + %%remark%% +
  *  syntax-highlighted code blocks (SPEC §9.1). */

@@ -83,12 +83,17 @@ export function wrapSelection(
   if (!root.contains(range.commonAncestorContainer)) return false;
 
   // Toggle off when the whole selection already lives inside the wrapper.
+  // Match tag + class exactly (a bare `closest("div")` would match the editor
+  // root itself and tear it out of the DOM).
   const containerParent =
     range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? (range.commonAncestorContainer as HTMLElement)
       : (range.commonAncestorContainer.parentElement as HTMLElement | null);
-  const existing = containerParent?.closest(tag);
-  if (existing && root.contains(existing)) {
+  const selector = className ? `${tag}.${className}` : tag;
+  const existing = containerParent?.closest(selector);
+  if (existing && existing !== root && root.contains(existing)) {
+    // Drop the note icon so it cannot leak into the text.
+    existing.querySelector(":scope > .card-note-icon")?.remove();
     const frag = document.createDocumentFragment();
     while (existing.firstChild) frag.appendChild(existing.firstChild);
     existing.replaceWith(frag);
@@ -137,10 +142,17 @@ export function insertNoteBlock(root: HTMLElement): boolean {
   const textNode = document.createTextNode("");
   note.appendChild(textNode);
 
-  // Place it right after the block the caret is in (top-level child of root).
+  // Place it right after the block the caret is in (top-level child of root);
+  // in an empty editor the caret sits on the root itself, so append inside.
   let block: Node = range.startContainer;
-  while (block.parentNode && block.parentNode !== root) block = block.parentNode;
-  block.parentNode?.insertBefore(note, block.nextSibling);
+  if (block !== root) {
+    while (block.parentNode && block.parentNode !== root) block = block.parentNode;
+  }
+  if (block === root) {
+    root.appendChild(note);
+  } else {
+    block.parentNode?.insertBefore(note, block.nextSibling);
+  }
 
   const caret = document.createRange();
   caret.setStart(textNode, 0);

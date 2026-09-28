@@ -36,11 +36,24 @@ shanka_study/
 ## 开发命令
 
 ```bash
-npm run tauri dev      # 开发运行（热重载）
+npm run tauri dev      # 完整应用（热重载）
+npm run dev            # 仅前端 → 浏览器调试模式（见下）
 cargo test             # Rust 核心测试（在 src-tauri/ 下执行）
 npm test               # 前端逻辑测试
 npm run tauri build    # 出安装包
 ```
+
+### 浏览器调试模式（mock 后端）
+
+`npm run dev` 启动 Vite 后，用浏览器打开：
+
+- `http://localhost:1420/` — 主窗口界面
+- `http://localhost:1420/?window=popup` — 复习弹窗界面
+
+浏览器里没有 Tauri 环境，`src/lib/mockBackend.ts` 会用内存假数据接管全部命令
+（4 张示例卡、设置、评分等），可直接用 DevTools 元素选择器定位问题、
+用 Console 看状态更新——**报 bug 时附上元素选择器和截图即可**。
+该模块是动态导入的，只在非 Tauri 环境加载，不影响正式包体积。
 
 ## 工程规范
 
