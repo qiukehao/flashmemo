@@ -1,6 +1,7 @@
 pub mod db;
 pub mod import;
 pub mod parser;
+pub mod scheduler;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
