@@ -49,6 +49,21 @@ describe("htmlToMarkdown (WYSIWYG save path)", () => {
     expect(roundTrip("用 `EXPLAIN` 分析")).toBe("用 `EXPLAIN` 分析");
     expect(roundTrip("#### 子标题")).toBe("#### 子标题");
   });
+
+  it("keeps Obsidian callouts through a save round-trip", () => {
+    const md = "> [!note] 傻瓜讲解\n> 可以把事务想象成一次银行转账。";
+    const out = roundTrip(md);
+    expect(out).toContain("> [!note] 傻瓜讲解");
+    expect(out).toContain("> 可以把事务想象成一次银行转账。");
+    expect(out).not.toContain("📘");
+  });
+
+  it("keeps multi-paragraph callouts (title line alone)", () => {
+    const md = "> [!NOTE] ✏️ 面试回答\n>\n> **要点**：内容";
+    const out = roundTrip(md);
+    expect(out).toContain("> [!note] ✏️ 面试回答");
+    expect(out).toContain("> **要点**：内容");
+  });
 });
 
 describe("wrapSelection / insertNoteBlock (editor DOM)", () => {

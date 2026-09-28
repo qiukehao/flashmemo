@@ -179,14 +179,19 @@ pub fn import_markdown(
 /// cards), plus how many locally-edited cards would conflict.
 pub fn preview_import(db: &Db, files: &[ImportFile]) -> Result<ImportPreview, String> {
     let decks = parse_files(files);
-    let mut preview = ImportPreview {
-        decks: decks.len() as u32,
-        deck_names: decks.iter().map(|d| d.name.clone()).collect(),
-        ..Default::default()
-    };
+    let mut preview = ImportPreview::default();
     for d in &decks {
-        preview.chapters += d.chapters.len() as u32;
+        // Empty decks (stray leading H1 etc.) are not part of the import.
+        if d.chapters.iter().all(|ch| ch.cards.is_empty()) {
+            continue;
+        }
+        preview.decks += 1;
+        preview.deck_names.push(d.name.clone());
         for ch in &d.chapters {
+            if ch.cards.is_empty() {
+                continue;
+            }
+            preview.chapters += 1;
             preview.cards += ch.cards.len() as u32;
             for card in &ch.cards {
                 if existing_local_edit_count(db, &d.name, &ch.name, &card.title) > 0 {

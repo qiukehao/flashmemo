@@ -1,5 +1,6 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { CardDto } from "./api";
+import { nonEmptyDecks, parseMarkdown } from "./markdownImport";
 
 /**
  * In-memory backend for browser debugging (SPEC 开发工具，非产品功能).
@@ -19,7 +20,7 @@ const cards: CardDto[] = [
     chapter: "事务",
     title: "事务的隔离级别有哪些？",
     contentMd:
-      "1. 读未提交（脏读）\n2. 读已提交（不可重复读）\n3. 可重复读（MySQL 默认，==间隙锁==防幻读）\n4. 串行化\n\n%%面试常问：MySQL 默认级别是哪个？答可重复读%%",
+      "> [!note] 傻瓜讲解\n> 可以把隔离级别想象成四个档位的隐私保护罩：读未提交＝不穿衣服，读已提交＝穿外套，可重复读＝防窥服，串行化＝排队。\n\n> [!NOTE] ✏️ 面试回答\n>\n> 1. 读未提交（脏读）\n> 2. 读已提交（不可重复读）\n> 3. 可重复读（MySQL 默认，==间隙锁==防幻读）\n> 4. 串行化\n\n%%面试常问：MySQL 默认级别是哪个？答可重复读%%",
     state: "review",
     dueAt: "2026-09-28T00:00:00.000Z",
     needsAttention: false,
@@ -216,10 +217,51 @@ export function installMockBackend(): void {
           )
           .map(clone);
       }
-      case "import_markdown":
-        return { added: 2, updated: 0, conflicts: 0, keptMissing: 0 };
-      case "preview_import":
-        return { decks: 1, chapters: 1, cards: 2, conflicts: 0, deckNames: ["示例卡包"] };
+      case "import_markdown": {
+        // Real parse (TS mirror of parser.rs) so import flows are testable in
+        // the browser; cards are appended to the in-memory store.
+        const files = (a.files as { name: string; content: string }[]) ?? [];
+        let added = 0;
+        for (const f of files) {
+          const stem = f.name.replace(/\.[^.]+$/, "");
+          for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
+            for (const ch of deck.chapters) {
+              for (const c of ch.cards) {
+                cards.push({
+                  id: nextId++,
+                  deck: deck.name,
+                  chapter: ch.name,
+                  title: c.title,
+                  contentMd: c.contentMd,
+                  state: "new",
+                  dueAt: new Date().toISOString(),
+                  needsAttention: false,
+                  level: 0,
+                });
+                added += 1;
+              }
+            }
+          }
+        }
+        return { added, updated: 0, conflicts: 0, keptMissing: 0 };
+      }
+      case "preview_import": {
+        const files = (a.files as { name: string; content: string }[]) ?? [];
+        let decksCount = 0;
+        let chapters = 0;
+        let cardCount = 0;
+        const deckNames: string[] = [];
+        for (const f of files) {
+          const stem = f.name.replace(/\.[^.]+$/, "");
+          for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
+            decksCount += 1;
+            deckNames.push(deck.name);
+            chapters += deck.chapters.length;
+            cardCount += deck.chapters.reduce((n, ch) => n + ch.cards.length, 0);
+          }
+        }
+        return { decks: decksCount, chapters, cards: cardCount, conflicts: 0, deckNames };
+      }
       case "due_count":
         return cards.length;
       case "get_settings":

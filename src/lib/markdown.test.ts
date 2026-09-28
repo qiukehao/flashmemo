@@ -36,6 +36,47 @@ describe("renderCard", () => {
     expect(html).toContain("hljs-keyword");
   });
 
+  it("renders Obsidian callouts with icon, title and body", () => {
+    const html = renderCard("> [!note] 傻瓜讲解\n> 可以把事务想象成一次银行转账。");
+    expect(html).toContain('class="callout callout-note"');
+    expect(html).toContain("📘");
+    expect(html).toContain("傻瓜讲解");
+    expect(html).toContain("可以把事务想象成一次银行转账。");
+    expect(html).not.toContain("[!note]");
+  });
+
+  it("handles uppercase markers and marker-only first lines", () => {
+    const html = renderCard("> [!NOTE] ✏️ 面试回答\n>\n> **要点**：内容");
+    expect(html).toContain("callout-note");
+    expect(html).toContain("✏️ 面试回答");
+    expect(html).toContain("<strong>要点</strong>");
+    expect(html).not.toContain("[!NOTE]");
+  });
+
+  it("uses a default title when the marker has none", () => {
+    const html = renderCard("> [!warning]\n> 注意这里");
+    expect(html).toContain("callout-warning");
+    expect(html).toContain("注意");
+  });
+
+  it("leaves plain blockquotes untouched", () => {
+    const html = renderCard("> 普通引用");
+    expect(html).toContain("<blockquote>");
+    expect(html).not.toContain("callout");
+  });
+
+  it("renders adjacent callouts as siblings, not nested", () => {
+    const html = renderCard(
+      "> [!note] 傻瓜讲解\n> 正文一\n\n> [!NOTE] 面试回答\n>\n> 正文二",
+    );
+    expect(html.match(/class="callout /g)?.length).toBe(2);
+    // Two sibling divs: the rendered HTML must close the first before the second opens.
+    const firstClose = html.indexOf("</div>");
+    const secondOpen = html.indexOf('class="callout callout-note"', firstClose);
+    expect(secondOpen).toBeGreaterThan(firstClose);
+    expect(html).not.toContain("<div class=\"callout callout-note\"><div class=\"callout callout-note\">");
+  });
+
   it("escapes raw html for safety", () => {
     const html = renderCard('<script>alert("x")</script>');
     expect(html).not.toContain("<script>");

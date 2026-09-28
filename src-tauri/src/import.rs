@@ -28,6 +28,11 @@ pub fn import(
         std::collections::HashSet::new();
 
     for deck in decks {
+        // A heading with no cards (e.g. a stray leading H1 in the user's note)
+        // must not create an empty deck.
+        if deck.chapters.iter().all(|ch| ch.cards.is_empty()) {
+            continue;
+        }
         let deck_id = db.upsert_deck(&deck.name, now)?;
         for chapter in &deck.chapters {
             let chapter_id = db.upsert_chapter(deck_id, &chapter.name)?;
@@ -98,6 +103,27 @@ mod tests {
 
     const V1: &str = "# MySQL\n\n## 事务\n\n### ACID\n原子性要点\n\n### 隔离级别\n要点B\n";
     const V2: &str = "# MySQL\n\n## 事务\n\n### ACID\n原子性要点-更新后\n\n### 隔离级别\n要点B\n";
+
+    #[test]
+    fn empty_h1_creates_no_empty_deck() {
+        // Real user note: leading "# MySQL" with no content, then "# Mysql重点".
+        let db = Db::open_in_memory().unwrap();
+        let src = "# MySQL\n\n# Mysql重点\n\n## 事务\n\n### 卡\n内容\n";
+        let report = import_src(&db, src, false);
+        assert_eq!(report.added, 1);
+        let decks: Vec<String> =
+            db.0.prepare("SELECT name FROM deck ORDER BY name")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+        assert_eq!(
+            decks,
+            ["Mysql重点"],
+            "stray empty H1 must not become a deck"
+        );
+    }
 
     #[test]
     fn import_new_cards() {

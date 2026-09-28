@@ -37,6 +37,32 @@ function makeTurndown(): TurndownService {
     },
   });
 
+  // Obsidian callouts: div.callout wraps a title <p> + the body blockquote.
+  // The title must not leak into the body markdown…
+  td.addRule("calloutTitle", {
+    filter: (node) =>
+      node.nodeName === "P" &&
+      (node as HTMLElement).classList?.contains("callout-title"),
+    replacement: () => "",
+  });
+  // …and the block itself goes back to `> [!type] title` + quoted body lines.
+  td.addRule("callout", {
+    filter: (node) =>
+      node.nodeName === "DIV" &&
+      (node as HTMLElement).classList?.contains("callout"),
+    replacement: (content, node) => {
+      const el = node as HTMLElement;
+      const type =
+        [...el.classList].find((c) => c.startsWith("callout-"))?.slice(8) ?? "note";
+      const title =
+        el.querySelector(".callout-title-text")?.textContent?.trim() ?? "";
+      // `content` is the already-converted child blockquote ("&gt; line" form).
+      const body = content.trim();
+      const marker = `> [!${type}]${title ? ` ${title}` : ""}`;
+      return `\n\n${marker}\n${body}\n\n`;
+    },
+  });
+
   // Fenced code blocks with their language (```js ... ```).
   td.addRule("fencedCode", {
     filter: (node) => node.nodeName === "PRE",
