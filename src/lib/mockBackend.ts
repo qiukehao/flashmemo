@@ -74,6 +74,19 @@ const settings: MockSettings = {
 
 let nextId = 100;
 let pendingSession: number[] | null = null;
+const SESSION_KEY = "mockPendingSession";
+
+// A browser has no second window: `start_review` navigates the current tab to
+// the popup view, and the selection survives the reload via sessionStorage.
+try {
+  const saved = sessionStorage.getItem(SESSION_KEY);
+  if (saved) {
+    pendingSession = JSON.parse(saved) as number[];
+    sessionStorage.removeItem(SESSION_KEY);
+  }
+} catch {
+  /* sessionStorage unavailable: fine, selection is simply not carried over */
+}
 
 function clone(c: CardDto): CardDto {
   return { ...c };
@@ -102,6 +115,13 @@ export function installMockBackend(): void {
         return cards.slice(0, Number(a.limit ?? 3)).map(clone);
       case "start_review": {
         pendingSession = (a.cardIds as number[]) ?? [];
+        // Swap to the popup view in this same tab (Tauri would open a window).
+        try {
+          sessionStorage.setItem(SESSION_KEY, JSON.stringify(pendingSession));
+        } catch {
+          /* ignore */
+        }
+        window.location.search = "?window=popup";
         return pendingSession.length;
       }
       case "preview_intervals":

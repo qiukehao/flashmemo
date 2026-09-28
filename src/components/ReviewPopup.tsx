@@ -10,8 +10,12 @@ import { htmlToMarkdown, insertNoteBlock, wrapSelection } from "../lib/wysiwyg";
 const appWindow = isTauri() ? getCurrentWebviewWindow() : null;
 
 function closeWindow() {
-  if (appWindow) appWindow.close().catch(() => {});
-  else console.info("[mock] 关闭弹窗（浏览器调试模式）");
+  if (appWindow) {
+    appWindow.close().catch(() => {});
+  } else {
+    // Browser mock mode has no second window: go back to the management view.
+    window.location.search = "?window=main";
+  }
 }
 
 const RATINGS: { name: RatingName; label: string; idx: number }[] = [
