@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardDto, type RatingName } from "../lib/api";
+import { isTextEntryTarget } from "../lib/dom";
 import { formatGap, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
 import { htmlToMarkdown, insertNoteBlock, wrapSelection } from "../lib/wysiwyg";
@@ -27,8 +28,9 @@ export default function ReviewPopup() {
   const [previews, setPreviews] = useState<number[]>([]);
   const [hintCount, setHintCount] = useState(HINT_MAX);
   const hintSaved = useRef(true);
-  // WYSIWYG annotation editing (SPEC §9.2): edit the rendered card in place.
-  const [editing, setEditing] = useState(false);
+  // The revealed card is ALWAYS editable in place (WYSIWYG, SPEC §9.2) — no
+  // edit-mode toggle. The DOM is uncontrolled: innerHTML is written once per
+  // card so autosaves can never reset the caret.
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const editorRef = useRef<HTMLDivElement | null>(null);
   const savedSnapshot = useRef("");
@@ -72,6 +74,17 @@ export default function ReviewPopup() {
     }
   }, [card, hintCount]);
 
+  // (Re)write the editor DOM only when the card changes — never on save, so
+  // the caret survives autosaves.
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el || !card) return;
+    el.innerHTML = renderCard(card.contentMd);
+    savedSnapshot.current = card.contentMd;
+    setSaveState("idle");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [card?.id]);
+
   /** Serialize the edited DOM back to markdown and persist if it changed. */
   const flushEditor = useCallback(async () => {
     const editor = editorRef.current;
@@ -96,28 +109,16 @@ export default function ReviewPopup() {
     autosaveTimer.current = window.setTimeout(() => void flushEditor(), AUTOSAVE_MS);
   }, [flushEditor]);
 
-  function startEditing() {
-    if (!card) return;
-    savedSnapshot.current = card.contentMd;
-    setSaveState("idle");
-    setEditing(true);
-    setTimeout(() => editorRef.current?.focus(), 0);
-  }
-
-  const stopEditing = useCallback(async () => {
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    await flushEditor();
-    setEditing(false);
-  }, [flushEditor]);
-
   /** Toolbar actions: apply the annotation trio to the live selection. */
   function applyBold() {
     const editor = editorRef.current;
     if (editor) wrapSelection(editor, "strong");
+    scheduleAutosave();
   }
   function applyHighlight() {
     const editor = editorRef.current;
     if (editor) wrapSelection(editor, "mark");
+    scheduleAutosave();
   }
   function applyNote() {
     const editor = editorRef.current;
@@ -126,11 +127,11 @@ export default function ReviewPopup() {
     const collapsed = !sel || sel.isCollapsed;
     if (collapsed) insertNoteBlock(editor);
     else wrapSelection(editor, "div", "card-note");
+    scheduleAutosave();
   }
 
   const advance = useCallback(() => {
     setRevealed(false);
-    setEditing(false);
     if (idx + 1 < queue.length) {
       setIdx(idx + 1);
     } else {
@@ -140,25 +141,25 @@ export default function ReviewPopup() {
 
   /** SPEC §8.4: Esc/✕ postpone unrated cards by the skip delay (no rating). */
   const skipCurrent = useCallback(async () => {
-    if (editing) await flushEditor();
+    await flushEditor();
     if (card) await api.skipCard(card.id).catch(() => {});
     advance();
-  }, [card, advance, flushEditor, editing]);
+  }, [card, advance, flushEditor]);
 
   const closeAll = useCallback(async () => {
-    if (editing) await flushEditor();
+    await flushEditor();
     for (const c of queue.slice(idx)) await api.skipCard(c.id).catch(() => {});
     closeWindow();
-  }, [queue, idx, flushEditor, editing]);
+  }, [queue, idx, flushEditor]);
 
   const rate = useCallback(
     async (name: RatingName) => {
       if (!card || !revealed) return;
-      if (editing) await flushEditor();
+      await flushEditor();
       await api.rateCard(card.id, name).catch(() => {});
       advance();
     },
-    [card, revealed, advance, flushEditor, editing],
+    [card, revealed, advance, flushEditor],
   );
 
   const act = useCallback(
@@ -177,15 +178,15 @@ export default function ReviewPopup() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // While annotating, the keyboard belongs to the editor: Esc exits the
-      // editor (SPEC §9.2), Ctrl+Enter finishes it.
-      if (editing) {
+      // Typing inside the editable card belongs to the text: Esc leaves the
+      // editor, Ctrl+Enter forces a save. Everything else is plain typing.
+      if (isTextEntryTarget(e.target)) {
         if (e.key === "Escape") {
           e.preventDefault();
-          void stopEditing();
+          (e.target as HTMLElement).blur();
         } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
           e.preventDefault();
-          void stopEditing();
+          void flushEditor();
         }
         return;
       }
@@ -196,7 +197,7 @@ export default function ReviewPopup() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [act, editing, stopEditing]);
+  }, [act, flushEditor]);
 
   if (loading) {
     return <div className="popup-root popup-empty">没有待复习的卡片</div>;
@@ -212,11 +213,6 @@ export default function ReviewPopup() {
           {card.deck} · {card.chapter}
           {card.needsAttention && " ⚠ 需专项理解"}
         </span>
-        {revealed && !editing && (
-          <button className="popup-icon-btn" onClick={startEditing} title="批注（编辑卡面）">
-            ✏️
-          </button>
-        )}
         <button className="popup-close" onClick={() => void closeAll()} title="关闭并跳过剩余">
           ✕
         </button>
@@ -224,32 +220,23 @@ export default function ReviewPopup() {
 
       <div className="popup-body">
         <div className="popup-front">{card.title}</div>
-        {editing ? (
-          <div className="popup-edit">
+        {revealed ? (
+          <>
             <div className="popup-edit-toolbar">
-              <button className="btn small" onClick={applyBold} title="加粗（Ctrl+B）">
+              <button className="btn small" onMouseDown={(e) => e.preventDefault()} onClick={applyBold} title="加粗选中文字（Ctrl+B）">
                 <b>B</b>
               </button>
-              <button className="btn small" onClick={applyHighlight} title="高亮选中文字">
+              <button className="btn small" onMouseDown={(e) => e.preventDefault()} onClick={applyHighlight} title="高亮选中文字">
                 🖍 高亮
               </button>
-              <button className="btn small" onClick={applyNote} title="插入/包裹备注">
+              <button className="btn small" onMouseDown={(e) => e.preventDefault()} onClick={applyNote} title="备注（选中则包裹，未选中则插入）">
                 📝 备注
               </button>
               <span className="edit-status muted small">
-                {saveState === "saving"
-                  ? "保存中…"
-                  : saveState === "saved"
-                    ? "已保存"
-                    : "编辑中（所见即所得）"}
+                {saveState === "saving" ? "保存中…" : saveState === "saved" ? "已保存" : "选中文字即可批注"}
               </span>
-              <button className="btn small primary" onClick={() => void stopEditing()}>
-                完成
-              </button>
             </div>
-            {/* WYSIWYG: the rendered card itself is editable in place. */}
             <div
-              key={card.id}
               ref={editorRef}
               className="popup-edit-wysiwyg popup-back"
               contentEditable
@@ -262,15 +249,8 @@ export default function ReviewPopup() {
                   applyBold();
                 }
               }}
-              dangerouslySetInnerHTML={{ __html: renderCard(card.contentMd) }}
             />
-          </div>
-        ) : revealed ? (
-          <div
-            className="popup-back"
-            // markdown-it escapes raw HTML (html:false) before this injection.
-            dangerouslySetInnerHTML={{ __html: renderCard(card.contentMd) }}
-          />
+          </>
         ) : (
           <button className="popup-reveal" onClick={() => act("reveal")}>
             显示答案（空格）
@@ -279,20 +259,20 @@ export default function ReviewPopup() {
       </div>
 
       <footer className="popup-footer">
-        {showHint && !editing && (
+        {showHint && (
           <div className="popup-hint">
-            1=不了解 2=熟悉 3=可以讲出来，按钮下方的数字是还要隔几张卡
+            1=不了解 2=熟悉 3=可以讲出来；答案区可直接点选文字批注
           </div>
         )}
         <div className="popup-buttons">
-          <button className="popup-btn skip" disabled={editing} onClick={() => void skipCurrent()}>
+          <button className="popup-btn skip" onClick={() => void skipCurrent()}>
             跳过
           </button>
           {RATINGS.map((r) => (
             <button
               key={r.name}
               className={`popup-btn ${r.name}`}
-              disabled={!revealed || editing}
+              disabled={!revealed}
               onClick={() => void rate(r.name)}
             >
               {r.label}

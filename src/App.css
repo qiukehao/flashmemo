@@ -419,6 +419,7 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
+  margin-bottom: 4px;
 }
 .popup-edit-toolbar .edit-status {
   margin-left: auto;
@@ -430,16 +431,20 @@ body {
 
 .popup-edit-wysiwyg {
   flex: 1;
-  min-height: 90px;
+  min-height: 80px;
   overflow: auto;
-  border: 1px dashed #fde68a;
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: #fffef8;
   outline: none;
+  border-radius: 8px;
+  padding: 4px 6px;
+  transition: box-shadow 0.15s;
 }
 .popup-edit-wysiwyg:focus {
-  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px #fde68a66;
+}
+.popup-edit-wysiwyg:empty::before {
+  content: "（点击这里可以直接修改答案）";
+  color: #9ca3af;
+  font-size: 12px;
 }
 .popup-edit-wysiwyg .card-note .card-note-icon {
   user-select: none;
