@@ -50,6 +50,31 @@ pub fn list_cards(deck: String, db: DbState) -> Result<Vec<CardDto>, String> {
 }
 
 #[tauri::command]
+pub fn rename_deck(old_name: String, new_name: String, db: DbState) -> Result<(), String> {
+    services::rename_deck(&lock(&db), &old_name, &new_name)
+}
+
+#[tauri::command]
+pub fn delete_deck(name: String, db: DbState) -> Result<(), String> {
+    services::delete_deck(&mut lock(&db), &name)
+}
+
+#[tauri::command]
+pub fn delete_card(card_id: i64, db: DbState) -> Result<(), String> {
+    services::delete_card(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn update_card(
+    card_id: i64,
+    title: String,
+    content_md: String,
+    db: DbState,
+) -> Result<CardDto, String> {
+    services::update_card(&lock(&db), card_id, &title, &content_md)
+}
+
+#[tauri::command]
 pub fn due_queue(limit: i64, db: DbState) -> Result<Vec<CardDto>, String> {
     services::due_queue(&lock(&db), limit)
 }

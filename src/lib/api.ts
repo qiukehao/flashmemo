@@ -28,6 +28,7 @@ export interface ImportPreview {
   chapters: number;
   cards: number;
   conflicts: number;
+  deckNames: string[];
 }
 
 export interface DeckOverview {
@@ -48,6 +49,12 @@ export const api = {
     invoke<CardDto>("add_card", { deck, chapter, title, contentMd }),
   listOverview: () => invoke<DeckOverview[]>("list_overview"),
   listCards: (deck: string) => invoke<CardDto[]>("list_cards", { deck }),
+  renameDeck: (oldName: string, newName: string) =>
+    invoke<void>("rename_deck", { oldName, newName }),
+  deleteDeck: (name: string) => invoke<void>("delete_deck", { name }),
+  deleteCard: (cardId: number) => invoke<void>("delete_card", { cardId }),
+  updateCard: (cardId: number, title: string, contentMd: string) =>
+    invoke<CardDto>("update_card", { cardId, title, contentMd }),
   dueQueue: (limit: number) => invoke<CardDto[]>("due_queue", { limit }),
   rateCard: (cardId: number, rating: RatingName) =>
     invoke<CardDto>("rate_card", { cardId, rating }),

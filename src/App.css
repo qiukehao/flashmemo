@@ -127,6 +127,61 @@ body {
   margin: 16px 0;
 }
 
+/* deck management page */
+.deck-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.deck-name {
+  font-weight: 600;
+  cursor: pointer;
+  flex: 1;
+}
+.deck-actions {
+  display: flex;
+  gap: 6px;
+}
+.deck-cards {
+  margin-top: 10px;
+  border-top: 1px solid #f3f4f6;
+  padding-top: 6px;
+}
+.deck-card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed #f3f4f6;
+}
+.deck-card-row > span:first-child {
+  flex: 1;
+}
+.card-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+}
+.card-edit input,
+.card-edit textarea {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: inherit;
+}
+.btn.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.btn.danger {
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.btn.danger:hover {
+  background: #fef2f2;
+}
+
 .form-row {
   display: flex;
   align-items: center;

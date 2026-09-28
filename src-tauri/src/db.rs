@@ -319,15 +319,73 @@ impl Db {
         rows.collect()
     }
 
-    /// All cards of one deck in reading order (chapter order, then insertion).
+    /// All cards of one deck in reading order (chapter order, then insertion),
+    /// excluding soft-deleted ones.
     pub fn list_cards_by_deck(&self, deck: &str) -> rusqlite::Result<Vec<Card>> {
         let sql = format!(
-            "{} WHERE d.name = ?1 ORDER BY ch.order_idx ASC, c.id ASC",
+            "{} WHERE d.name = ?1 AND c.state != 'suspended'
+             ORDER BY ch.order_idx ASC, c.id ASC",
             Self::CARD_SELECT
         );
         let mut stmt = self.0.prepare(&sql)?;
         let rows = stmt.query_map([deck], Self::row_to_card)?;
         rows.collect()
+    }
+
+    /// SPEC §6: deleting a card is a soft delete (suspended), physical purge
+    /// happens later.
+    pub fn delete_card(&self, card_id: i64) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE card SET state='suspended' WHERE id=?1 AND state != 'suspended'",
+            [card_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn update_card(
+        &self,
+        card_id: i64,
+        title: &str,
+        content_md: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE card SET title=?1, content_md=?2 WHERE id=?3",
+            rusqlite::params![title, content_md, card_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn rename_deck(&self, old_name: &str, new_name: &str) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE deck SET name=?1 WHERE name=?2",
+            [new_name, old_name],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Delete a deck with its cards and chapters in one transaction. Cards go
+    /// first (no FK cascade on card→chapter), then the deck row cascades its
+    /// chapters; review_log / card_link rows cascade via their own FKs.
+    pub fn delete_deck(&mut self, deck: &str) -> rusqlite::Result<bool> {
+        let tx = self.0.transaction()?;
+        let deck_id: Option<i64> = tx
+            .query_row("SELECT id FROM deck WHERE name=?1", [deck], |r| r.get(0))
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        let Some(id) = deck_id else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        tx.execute(
+            "DELETE FROM card WHERE chapter_id IN (SELECT id FROM chapter WHERE deck_id=?1)",
+            [id],
+        )?;
+        tx.execute("DELETE FROM deck WHERE id=?1", [id])?;
+        tx.commit()?;
+        Ok(true)
     }
 }
 

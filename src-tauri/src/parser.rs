@@ -25,9 +25,13 @@ const DEFAULT_CHAPTER: &str = "未分类";
 
 /// One entry in the parser state machine: card body lines are collected raw and
 /// only trimmed/joined when the card ends, so blank lines inside the body survive.
+/// Chapters seen before the first `#` wait in `pending` and join the first deck
+/// that appears (SPEC §5.2 rule 9: the filename is only a fallback when the file
+/// has no H1 at all).
 struct State {
     decks: Vec<ParsedDeck>,
     deck: Option<ParsedDeck>,
+    pending: Vec<ParsedChapter>,
     chapter: Option<ParsedChapter>,
     card: Option<(String, Vec<String>)>,
 }
@@ -49,31 +53,35 @@ impl State {
     fn end_chapter(&mut self) {
         self.end_card();
         if let Some(ch) = self.chapter.take() {
-            if let Some(d) = &mut self.deck {
-                d.chapters.push(ch);
+            match &mut self.deck {
+                Some(d) => d.chapters.push(ch),
+                None => self.pending.push(ch),
             }
         }
     }
 
-    fn end_deck(&mut self) {
+    /// Called when a new H1 starts: emit the finished deck, carry `pending`
+    /// over to the upcoming deck.
+    fn flush_deck(&mut self) {
         self.end_chapter();
-        // No H1 seen and nothing lazily created the fallback deck: nothing to emit.
         if let Some(d) = self.deck.take() {
             self.decks.push(d);
         }
     }
 
-    fn ensure_deck(&mut self, fallback_deck: &str) {
-        if self.deck.is_none() {
-            self.deck = Some(ParsedDeck {
+    /// End of input: emit the last deck; chapters still pending belong to a
+    /// fallback deck only when no H1 ever appeared.
+    fn finish(&mut self, fallback_deck: &str) {
+        self.flush_deck();
+        if !self.pending.is_empty() {
+            self.decks.push(ParsedDeck {
                 name: fallback_deck.to_string(),
-                chapters: Vec::new(),
+                chapters: std::mem::take(&mut self.pending),
             });
         }
     }
 
-    fn ensure_chapter(&mut self, fallback_deck: &str) {
-        self.ensure_deck(fallback_deck);
+    fn ensure_chapter(&mut self) {
         if self.chapter.is_none() {
             self.chapter = Some(ParsedChapter {
                 name: DEFAULT_CHAPTER.to_string(),
@@ -136,6 +144,7 @@ pub fn parse_markdown(src: &str, fallback_deck: &str) -> Vec<ParsedDeck> {
     let mut st = State {
         decks: Vec::new(),
         deck: None,
+        pending: Vec::new(),
         chapter: None,
         card: None,
     };
@@ -159,20 +168,14 @@ pub fn parse_markdown(src: &str, fallback_deck: &str) -> Vec<ParsedDeck> {
         }
         match heading_level(line) {
             Some((1, name)) => {
-                st.end_deck();
+                st.flush_deck();
                 st.deck = Some(ParsedDeck {
                     name,
-                    chapters: Vec::new(),
+                    chapters: std::mem::take(&mut st.pending),
                 });
             }
             Some((2, name)) => {
-                st.end_card();
-                st.ensure_deck(fallback_deck);
-                if let Some(ch) = st.chapter.take() {
-                    if let Some(d) = &mut st.deck {
-                        d.chapters.push(ch);
-                    }
-                }
+                st.end_chapter();
                 st.chapter = Some(ParsedChapter {
                     name,
                     cards: Vec::new(),
@@ -180,14 +183,14 @@ pub fn parse_markdown(src: &str, fallback_deck: &str) -> Vec<ParsedDeck> {
             }
             Some((3, title)) => {
                 st.end_card();
-                st.ensure_chapter(fallback_deck);
+                st.ensure_chapter();
                 st.card = Some((title, Vec::new()));
             }
             // `####` and deeper are body text (SPEC §5.2 rule 4).
             _ => st.push_body(line),
         }
     }
-    st.end_deck();
+    st.finish(fallback_deck);
     st.decks
 }
 
@@ -276,6 +279,18 @@ mod tests {
         assert_eq!(decks.len(), 1);
         assert_eq!(decks[0].name, "文件名卡包");
         assert_eq!(decks[0].chapters[0].name, "章");
+    }
+
+    #[test]
+    fn pre_h1_content_joins_first_deck() {
+        // Content before the first H1 must NOT become a filename deck when a
+        // real H1 exists later in the file.
+        let src = "## C1\n\n### 卡1\nx\n\n# REAL\n\n### 卡2\ny\n";
+        let decks = parse_markdown(src, "文件名卡包");
+        assert_eq!(decks.len(), 1, "no filename deck when an H1 exists");
+        assert_eq!(decks[0].name, "REAL");
+        let names: Vec<&str> = decks[0].chapters.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["C1", "未分类"]);
     }
 
     #[test]

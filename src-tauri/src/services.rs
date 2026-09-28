@@ -45,6 +45,7 @@ pub struct ImportPreview {
     pub chapters: u32,
     pub cards: u32,
     pub conflicts: u32,
+    pub deck_names: Vec<String>,
 }
 
 fn state_to_str(s: CardState) -> &'static str {
@@ -175,6 +176,7 @@ pub fn preview_import(db: &Db, files: &[ImportFile]) -> Result<ImportPreview, St
     let decks = parse_files(files);
     let mut preview = ImportPreview {
         decks: decks.len() as u32,
+        deck_names: decks.iter().map(|d| d.name.clone()).collect(),
         ..Default::default()
     };
     for d in &decks {
@@ -258,6 +260,60 @@ pub fn list_cards(db: &Db, deck: &str) -> Result<Vec<CardDto>, String> {
         .iter()
         .map(to_dto)
         .collect())
+}
+
+pub fn rename_deck(db: &Db, old_name: &str, new_name: &str) -> Result<(), String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("卡包名不能为空".into());
+    }
+    let renamed = db.rename_deck(old_name, new_name).map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            "卡包名已存在".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    if !renamed {
+        return Err("卡包不存在".into());
+    }
+    Ok(())
+}
+
+pub fn delete_deck(db: &mut Db, name: &str) -> Result<(), String> {
+    if !db.delete_deck(name).map_err(|e| e.to_string())? {
+        return Err("卡包不存在".into());
+    }
+    Ok(())
+}
+
+/// SPEC §6: soft delete — suspended cards leave every queue but stay in the DB.
+pub fn delete_card(db: &Db, card_id: i64) -> Result<(), String> {
+    if !db.delete_card(card_id).map_err(|e| e.to_string())? {
+        return Err("卡片不存在".into());
+    }
+    Ok(())
+}
+
+pub fn update_card(
+    db: &Db,
+    card_id: i64,
+    title: &str,
+    content_md: &str,
+) -> Result<CardDto, String> {
+    if title.trim().is_empty() {
+        return Err("卡片标题不能为空".into());
+    }
+    if !db
+        .update_card(card_id, title.trim(), content_md)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("卡片不存在".into());
+    }
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared after update".into())
 }
 
 /// Rate a card: scheduler decides, then card update + review_log row commit in
@@ -501,6 +557,71 @@ mod tests {
         );
         assert!(cards.iter().all(|c| c.deck == "MySQL"));
         assert_eq!(list_cards(&d, "不存在").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn rename_deck_updates_name_and_keeps_cards() {
+        let d = db();
+        add_card(&d, "旧名", "C", "T1", "x").unwrap();
+        rename_deck(&d, "旧名", "新名").unwrap();
+        assert_eq!(list_cards(&d, "新名").unwrap().len(), 1);
+        assert!(list_cards(&d, "旧名").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rename_deck_rejects_duplicate_and_blank() {
+        let d = db();
+        add_card(&d, "A", "C", "T", "x").unwrap();
+        add_card(&d, "B", "C", "T", "x").unwrap();
+        assert!(rename_deck(&d, "A", "B").is_err());
+        assert!(rename_deck(&d, "A", "  ").is_err());
+        assert!(rename_deck(&d, "不存在", "X").is_err());
+    }
+
+    #[test]
+    fn delete_deck_removes_cards_chapters_and_logs() {
+        let mut d = db();
+        let dto = add_card(&d, "目标包", "C", "T1", "x").unwrap();
+        add_card(&d, "目标包", "C", "T2", "x").unwrap();
+        add_card(&d, "保留包", "C", "T3", "x").unwrap();
+        rate(&mut d, dto.id, "good").unwrap(); // review_log row exists
+        delete_deck(&mut d, "目标包").unwrap();
+        let cards: i64 =
+            d.0.query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))
+                .unwrap();
+        let logs: i64 =
+            d.0.query_row("SELECT COUNT(*) FROM review_log", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!((cards, logs), (1, 0), "target deck fully removed");
+        assert_eq!(list_cards(&d, "保留包").unwrap().len(), 1);
+        assert!(delete_deck(&mut d, "不存在").is_err());
+    }
+
+    #[test]
+    fn delete_card_suspends_and_hides() {
+        let d = db();
+        let dto = add_card(&d, "D", "C", "T", "x").unwrap();
+        delete_card(&d, dto.id).unwrap();
+        assert!(list_cards(&d, "D").unwrap().is_empty());
+        assert!(due_queue(&d, 10).unwrap().is_empty());
+        // Soft delete: the row stays with state suspended.
+        let state: String =
+            d.0.query_row("SELECT state FROM card WHERE id=?1", [dto.id], |r| r.get(0))
+                .unwrap();
+        assert_eq!(state, "suspended");
+        assert!(delete_card(&d, dto.id).is_err(), "already deleted");
+    }
+
+    #[test]
+    fn update_card_edits_title_and_content() {
+        let d = db();
+        let dto = add_card(&d, "D", "C", "旧题", "旧内容").unwrap();
+        let after = update_card(&d, dto.id, "新题", "新内容").unwrap();
+        assert_eq!(
+            (after.title.as_str(), after.content_md.as_str()),
+            ("新题", "新内容")
+        );
+        assert!(update_card(&d, dto.id, "", "x").is_err());
     }
 
     #[test]

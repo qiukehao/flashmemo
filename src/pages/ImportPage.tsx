@@ -82,6 +82,9 @@ export default function ImportPage({
             {preview.decks} 个卡包 · {preview.chapters} 个章节 · {preview.cards} 张卡
             {preview.conflicts > 0 && ` · ${preview.conflicts} 张本地编辑冲突`}
           </p>
+          {preview.deckNames.length > 0 && (
+            <p className="muted small">将创建卡包：{preview.deckNames.join("、")}</p>
+          )}
           <label className="muted">
             <input
               type="checkbox"

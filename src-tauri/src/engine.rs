@@ -10,9 +10,7 @@ use tauri::{Listener, Manager};
 
 const TICK_SECS: u64 = 15;
 const POPUP_SIZE: (f64, f64) = (440.0, 380.0);
-const MARGIN: f64 = 20.0;
 const TASKBAR_RESERVE: f64 = 48.0;
-const MIN_OFFSET_FROM_LAST: f64 = 100.0;
 
 pub struct EngineSettings {
     pub interval_min: u32,
@@ -34,11 +32,10 @@ impl Default for EngineSettings {
     }
 }
 
-/// Position of the last popup + last notification time, shared between the
-/// tick thread and the `force-review` listener.
+/// Last notification time, shared between the tick thread and the
+/// `force-review` listener.
 #[derive(Default)]
 pub struct EngineState {
-    pub last_pos: Option<(f64, f64)>,
     pub last_notify: Option<DateTime<Utc>>,
 }
 
@@ -76,33 +73,13 @@ pub fn popup_decision(
     due_count > 0 && !popup_open && in_study_hours(now, s) && not_paused(s)
 }
 
-/// Random spot in the monitor work area: >= MARGIN from edges, below the
-/// taskbar reserve, and >= MIN_OFFSET_FROM_LAST away from the previous popup.
-/// `rand` is a pair in [0,1) so tests are deterministic.
-pub fn popup_position(
-    monitor: (f64, f64, f64, f64),
-    win: (f64, f64),
-    last: Option<(f64, f64)>,
-    rand: (f64, f64),
-) -> (f64, f64) {
+/// Center of the monitor work area (2026-09-28 调整：用户要求固定居中，替代
+/// 原随机位置方案). Vertically centered above the taskbar reserve.
+pub fn popup_position(monitor: (f64, f64, f64, f64), win: (f64, f64)) -> (f64, f64) {
     let (mx, my, mw, mh) = monitor;
     let (ww, wh) = win;
-    let min_x = mx + MARGIN;
-    let min_y = my + MARGIN;
-    let max_x = (mx + mw - MARGIN - ww).max(min_x);
-    let max_y = (my + mh - TASKBAR_RESERVE - MARGIN - wh).max(min_y);
-    let mut x = (min_x + rand.0 * (max_x - min_x)).clamp(min_x, max_x);
-    let y = (min_y + rand.1 * (max_y - min_y)).clamp(min_y, max_y);
-    if let Some((lx, ly)) = last {
-        if (x - lx).abs() < MIN_OFFSET_FROM_LAST && (y - ly).abs() < MIN_OFFSET_FROM_LAST {
-            x = if lx + MIN_OFFSET_FROM_LAST <= max_x {
-                lx + MIN_OFFSET_FROM_LAST
-            } else {
-                (lx - MIN_OFFSET_FROM_LAST).max(min_x)
-            };
-        }
-    }
-    (x, y)
+    let work_h = (mh - TASKBAR_RESERVE).max(wh);
+    (mx + (mw - ww) / 2.0, my + (work_h - wh) / 2.0)
 }
 
 fn read_settings(db: &Db) -> EngineSettings {
@@ -150,14 +127,10 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
     if popup_open {
         return false;
     }
-    let rand = pseudo_rand();
     let (mx, my, mw, mh) = cursor_monitor(app);
-    let pos = popup_position((mx, my, mw, mh), POPUP_SIZE, st.last_pos, rand);
+    let pos = popup_position((mx, my, mw, mh), POPUP_SIZE);
     match open_popup(app, pos) {
-        Ok(_window) => {
-            st.last_pos = Some(pos);
-            true
-        }
+        Ok(_window) => true,
         Err(_) => false,
     }
 }
@@ -208,22 +181,6 @@ fn open_popup(app: &tauri::AppHandle, pos: (f64, f64)) -> tauri::Result<tauri::W
         .always_on_top(true)
         .focused(false)
         .build()
-}
-
-/// Cheap SplitMix64 in [0,1)² — no external RNG dependency for two floats.
-fn pseudo_rand() -> (f64, f64) {
-    let mut z = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15);
-    let mut next = move || {
-        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let x = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        let x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        (x ^ (x >> 31)) >> 11
-    };
-    let scale = (1u64 << 53) as f64;
-    ((next() as f64) / scale, (next() as f64) / scale)
 }
 
 /// Background loop; also re-evaluated immediately on `force-review` events.
@@ -291,23 +248,18 @@ mod tests {
     }
 
     #[test]
-    fn popup_position_respects_margins_and_offset() {
+    fn popup_position_is_workarea_center() {
         let monitor = (0.0, 0.0, 1920.0, 1080.0);
-        // rand (0,0) -> top-left margin corner.
+        // Horizontally centered; vertically centered above the taskbar reserve.
         assert_eq!(
-            popup_position(monitor, POPUP_SIZE, None, (0.0, 0.0)),
-            (20.0, 20.0)
+            popup_position(monitor, POPUP_SIZE),
+            ((1920.0 - 440.0) / 2.0, (1080.0 - 48.0 - 380.0) / 2.0)
         );
-        // Same spot twice: second must shift >= 100px away.
-        let (x, y) = popup_position(monitor, POPUP_SIZE, Some((20.0, 20.0)), (0.0, 0.0));
-        assert!((x - 20.0).abs() >= 100.0 || (y - 20.0).abs() >= 100.0);
-        assert_eq!(y, 20.0, "y unchanged; x shifts right");
-        assert_eq!(x, 120.0);
-        // Tiny screen clamps inside bounds.
-        let small = (0.0, 0.0, 500.0, 400.0);
-        let (x, y) = popup_position(small, POPUP_SIZE, None, (0.0, 0.0));
-        assert!((20.0..=40.0).contains(&x));
-        assert!((20.0..=32.0).contains(&y));
+        // Works on offset monitors too (multi-display).
+        let offset = (1920.0, 0.0, 2560.0, 1440.0);
+        let (x, y) = popup_position(offset, POPUP_SIZE);
+        assert_eq!(x, 1920.0 + (2560.0 - 440.0) / 2.0);
+        assert_eq!(y, (1440.0 - 48.0 - 380.0) / 2.0);
     }
 
     #[test]
