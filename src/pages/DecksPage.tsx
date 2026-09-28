@@ -13,6 +13,18 @@ export function levelLabel(level: number, state: string): string {
   return STATE_LABEL[state] ?? LEVEL_LABEL[Math.min(Math.max(level, 0), 5)];
 }
 
+/** Group cards by chapter, preserving first-seen order (backend returns
+ *  cards in reading order: chapter order_idx, then insertion). */
+function chaptersOf(cards: CardDto[]): [string, CardDto[]][] {
+  const map = new Map<string, CardDto[]>();
+  for (const c of cards) {
+    const list = map.get(c.chapter);
+    if (list) list.push(c);
+    else map.set(c.chapter, [c]);
+  }
+  return [...map.entries()];
+}
+
 const FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "全部" },
   { key: "due", label: "可复习" },
@@ -368,7 +380,21 @@ export default function DecksPage() {
                       全选本包（{cards.length} 张）
                     </label>
                   )}
-                  {cards.map((c) => cardRow(c, false))}
+                  {/* Group by chapter, preserving the reading order. */}
+                  {chaptersOf(cards).map(([chapter, list]) => (
+                    <div className="deck-chapter" key={chapter}>
+                      <div className="deck-chapter-title">
+                        <span>{chapter}</span>
+                        <span className="muted small">
+                          {list.length} 张
+                          <button className="btn small" onClick={() => toggleAll(list)}>
+                            全选
+                          </button>
+                        </span>
+                      </div>
+                      {list.map((c) => cardRow(c, false))}
+                    </div>
+                  ))}
                   {cards.length === 0 && <p className="muted small">该卡包暂无卡片</p>}
                 </div>
               )}

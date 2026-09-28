@@ -499,3 +499,23 @@ body {
 .callout-question .callout-title { color: #0369a1; }
 .callout-info, .callout-example, .callout-quote { border-color: #64748b; background: #f8fafc; }
 .callout-info .callout-title, .callout-example .callout-title, .callout-quote .callout-title { color: #475569; }
+
+/* chapter grouping inside an expanded deck */
+.deck-chapter {
+  margin: 10px 0;
+}
+.deck-chapter-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  background: #f3f4f6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 2px;
+}
+.deck-chapter-title .btn.small {
+  margin-left: 8px;
+}
