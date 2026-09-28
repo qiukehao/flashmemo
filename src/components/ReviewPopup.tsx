@@ -34,8 +34,8 @@ export default function ReviewPopup() {
     (async () => {
       try {
         const settings = await api.getSettings();
-        const per = Number.parseInt(settings.per_popup ?? "1", 10) || 1;
-        const q = await api.dueQueue(per);
+        // A pending manual selection wins; otherwise the due queue batch.
+        const q = await api.reviewQueue();
         setQueue(q);
         setHintCount(Number.parseInt(settings.hint_shown_count ?? "0", 10) || 0);
         hintSaved.current = false;

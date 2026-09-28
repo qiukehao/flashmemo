@@ -50,6 +50,15 @@ pub fn parse_time(s: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+/// Escapes LIKE wildcards so user input matches literally.
+fn like_pattern(q: &str) -> String {
+    let escaped = q
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE deck (
   id INTEGER PRIMARY KEY,
@@ -361,6 +370,70 @@ impl Db {
             [new_name, old_name],
         )?;
         Ok(n > 0)
+    }
+
+    /// Cards by explicit id list, preserving the requested order and skipping
+    /// missing/suspended rows (manual review sessions).
+    pub fn cards_by_ids(&self, ids: &[i64]) -> rusqlite::Result<Vec<Card>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "{} WHERE c.id IN ({placeholders}) AND c.state != 'suspended'",
+            Self::CARD_SELECT
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids), Self::row_to_card)?;
+        let found: Vec<Card> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut by_id: std::collections::HashMap<i64, Card> =
+            found.into_iter().map(|c| (c.id, c)).collect();
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
+    /// Search + filter for the deck browser. `filter` is one of
+    /// all|due|new|learning|review|archived; an empty query matches everything.
+    pub fn search_cards(
+        &self,
+        query: Option<&str>,
+        deck: Option<&str>,
+        filter: &str,
+    ) -> rusqlite::Result<Vec<Card>> {
+        let mut sql = format!("{} WHERE c.state != 'suspended'", Self::CARD_SELECT);
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut idx = 1;
+        if let Some(p) = query
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(like_pattern)
+        {
+            sql.push_str(&format!(
+                " AND (c.title LIKE ?{idx} ESCAPE '\\' OR c.content_md LIKE ?{idx} ESCAPE '\\')"
+            ));
+            args.push(Box::new(p));
+            idx += 1;
+        }
+        if let Some(name) = deck.filter(|d| !d.is_empty()) {
+            sql.push_str(&format!(" AND d.name = ?{idx}"));
+            args.push(Box::new(name.to_string()));
+            idx += 1;
+        }
+        match filter {
+            "due" => {
+                sql.push_str(&format!(" AND c.due_at <= ?{idx}"));
+                args.push(Box::new(fmt_time(Utc::now())));
+            }
+            "new" => sql.push_str(" AND c.state = 'new'"),
+            "learning" => sql.push_str(" AND c.state IN ('learning','relearning')"),
+            "review" => sql.push_str(" AND c.state = 'review'"),
+            "archived" => sql.push_str(" AND c.state = 'archived'"),
+            _ => {}
+        }
+        sql.push_str(" ORDER BY d.name, ch.order_idx, c.id");
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map(refs.as_slice(), Self::row_to_card)?;
+        rows.collect()
     }
 
     /// Delete a deck with its cards and chapters in one transaction. Cards go

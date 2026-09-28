@@ -316,6 +316,58 @@ pub fn update_card(
         .ok_or_else(|| "card disappeared after update".into())
 }
 
+/// Search + filter for the deck browser (SPEC §15.2 搜索/筛选).
+pub fn search_cards(
+    db: &Db,
+    query: Option<String>,
+    deck: Option<String>,
+    filter: Option<String>,
+) -> Result<Vec<CardDto>, String> {
+    let filter = filter.unwrap_or_else(|| "all".into());
+    Ok(db
+        .search_cards(query.as_deref(), deck.as_deref(), &filter)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(to_dto)
+        .collect())
+}
+
+/// Cards by explicit id list, requested order preserved (manual sessions).
+pub fn cards_by_ids(db: &Db, ids: &[i64]) -> Result<Vec<CardDto>, String> {
+    Ok(db
+        .cards_by_ids(ids)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(to_dto)
+        .collect())
+}
+
+/// Explicit-card review session: the popup consumes the pending id list once
+/// (set by "复习选中/复习该包"), otherwise falls back to the due queue.
+pub type ReviewSession = std::sync::Mutex<Option<Vec<i64>>>;
+
+pub fn set_review_session(slot: &ReviewSession, ids: Vec<i64>) {
+    *slot.lock().expect("review session poisoned") = Some(ids);
+}
+
+pub fn review_queue(db: &Db, slot: &ReviewSession, due_limit: i64) -> Result<Vec<CardDto>, String> {
+    let pending = slot.lock().expect("review session poisoned").take();
+    if let Some(ids) = pending {
+        return Ok(db
+            .cards_by_ids(&ids)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(to_dto)
+            .collect());
+    }
+    due_queue(db, due_limit)
+}
+
+/// Due cards of one deck — the "复习该包" button.
+pub fn due_cards_of_deck(db: &Db, deck: &str) -> Result<Vec<CardDto>, String> {
+    search_cards(db, None, Some(deck.to_string()), Some("due".into()))
+}
+
 /// Rate a card: scheduler decides, then card update + review_log row commit in
 /// one transaction (SPEC §17: a crash must never lose a rating).
 pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> {
@@ -622,6 +674,88 @@ mod tests {
             ("新题", "新内容")
         );
         assert!(update_card(&d, dto.id, "", "x").is_err());
+    }
+
+    #[test]
+    fn search_filters_by_query_deck_and_state() {
+        let d = db();
+        add_card(&d, "MySQL", "事务", "ACID 是什么", "原子性 一致性").unwrap();
+        add_card(&d, "MySQL", "索引", "B+树", "聚簇索引").unwrap();
+        add_card(&d, "Redis", "持久化", "RDB", "快照").unwrap();
+
+        // Title match.
+        let r = search_cards(&d, Some("ACID".into()), None, None).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].title, "ACID 是什么");
+        // Content match.
+        let r = search_cards(&d, Some("快照".into()), None, None).unwrap();
+        assert_eq!(
+            r.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            ["RDB"]
+        );
+        // Deck scoping.
+        let r = search_cards(&d, None, Some("MySQL".into()), None).unwrap();
+        assert_eq!(r.len(), 2);
+        // State filter: all cards are new.
+        let r = search_cards(&d, None, None, Some("new".into())).unwrap();
+        assert_eq!(r.len(), 3);
+        let r = search_cards(&d, None, None, Some("due".into())).unwrap();
+        assert_eq!(r.len(), 3, "fresh cards are due immediately");
+        // LIKE wildcards in user input are literal.
+        let r = search_cards(&d, Some("%".into()), None, None).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn review_session_is_consumed_once() {
+        let d = db();
+        let a = add_card(&d, "D", "C", "卡A", "x").unwrap();
+        let b = add_card(&d, "D", "C", "卡B", "x").unwrap();
+        let slot = ReviewSession::default();
+        set_review_session(&slot, vec![b.id, a.id]);
+        let q = review_queue(&d, &slot, 1).unwrap();
+        assert_eq!(
+            q.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            ["卡B", "卡A"],
+            "session order is preserved"
+        );
+        // Second call: session consumed, falls back to the due queue (limit 1).
+        let q = review_queue(&d, &slot, 1).unwrap();
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn session_includes_not_yet_due_cards() {
+        let d = db();
+        let c = add_card(&d, "D", "C", "未到期", "x").unwrap();
+        d.0.execute(
+            "UPDATE card SET due_at=?1 WHERE id=?2",
+            rusqlite::params![
+                crate::db::fmt_time(Utc::now() + chrono::Duration::days(5)),
+                c.id
+            ],
+        )
+        .unwrap();
+        let slot = ReviewSession::default();
+        set_review_session(&slot, vec![c.id]);
+        let q = review_queue(&d, &slot, 10).unwrap();
+        assert_eq!(
+            q.len(),
+            1,
+            "manual session reviews cards regardless of due time"
+        );
+    }
+
+    #[test]
+    fn due_cards_of_deck_scopes_correctly() {
+        let d = db();
+        add_card(&d, "A包", "C", "T1", "x").unwrap();
+        add_card(&d, "B包", "C", "T2", "x").unwrap();
+        let r = due_cards_of_deck(&d, "A包").unwrap();
+        assert_eq!(
+            r.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            ["T1"]
+        );
     }
 
     #[test]

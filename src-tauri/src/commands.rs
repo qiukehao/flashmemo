@@ -3,15 +3,71 @@
 
 use crate::db::Db;
 use crate::import::ImportReport;
-use crate::services::{self, CardDto, DeckOverview, ImportFile, ImportPreview};
+use crate::services::{self, CardDto, DeckOverview, ImportFile, ImportPreview, ReviewSession};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 type DbState<'a> = State<'a, Mutex<Db>>;
+type SessionState<'a> = State<'a, ReviewSession>;
 
 fn lock<'a>(db: &'a DbState<'a>) -> std::sync::MutexGuard<'a, Db> {
     db.lock().expect("db mutex poisoned")
+}
+
+/// Popup queue: a pending manual selection first, else the due queue.
+#[tauri::command]
+pub fn review_queue(
+    session: SessionState,
+    db: DbState,
+    app: tauri::AppHandle,
+) -> Result<Vec<CardDto>, String> {
+    let limit = app
+        .try_state::<Mutex<Db>>()
+        .and_then(|cell| {
+            let guard = cell.lock().ok()?;
+            guard
+                .get_setting("per_popup")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+        })
+        .unwrap_or(1);
+    services::review_queue(&lock(&db), &session, limit)
+}
+
+/// Start a review session over explicit cards and open the popup at once.
+#[tauri::command]
+pub fn start_review(
+    card_ids: Vec<i64>,
+    session: SessionState,
+    db: DbState,
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    let cards = {
+        let guard = lock(&db);
+        services::cards_by_ids(&guard, &card_ids)?
+    };
+    if cards.is_empty() {
+        return Err("选中的卡片不存在".into());
+    }
+    let ids: Vec<i64> = cards.iter().map(|c| c.id).collect();
+    let n = ids.len();
+    services::set_review_session(&session, ids);
+    if !crate::engine::open_review_popup(&app) {
+        return Err("无法打开复习弹窗".into());
+    }
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn search_cards(
+    query: Option<String>,
+    deck: Option<String>,
+    filter: Option<String>,
+    db: DbState,
+) -> Result<Vec<CardDto>, String> {
+    services::search_cards(&lock(&db), query, deck, filter)
 }
 
 #[tauri::command]

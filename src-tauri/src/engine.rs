@@ -197,6 +197,17 @@ fn open_popup(app: &tauri::AppHandle, pos: (f64, f64)) -> tauri::Result<tauri::W
         .build()
 }
 
+/// Open a popup right now for an explicit card selection ("复习选中/复习该包").
+/// Replaces any popup already on screen so the new session takes effect.
+pub fn open_review_popup(app: &tauri::AppHandle) -> bool {
+    if let Some(w) = app.get_webview_window("popup") {
+        let _ = w.close();
+    }
+    let (mx, my, mw, mh) = cursor_monitor_logical(app);
+    let pos = popup_position((mx, my, mw, mh), POPUP_SIZE);
+    open_popup(app, pos).is_ok()
+}
+
 /// Background loop; also re-evaluated immediately on `force-review` events.
 pub fn spawn(app: tauri::AppHandle, state: std::sync::Arc<Mutex<EngineState>>) {
     std::thread::spawn(move || loop {

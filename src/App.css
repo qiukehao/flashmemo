@@ -128,6 +128,39 @@ body {
 }
 
 /* deck management page */
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+.toolbar .search-input {
+  flex: 1;
+  min-width: 220px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+.toolbar select {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  background: #fff;
+}
+.row-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.card-title-cell {
+  flex: 1;
+}
+.card-title-cell small {
+  margin-left: 6px;
+}
 .deck-row {
   display: flex;
   align-items: center;

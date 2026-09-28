@@ -58,6 +58,8 @@ pub fn run() {
                 .join("data.db");
             let database = db::Db::open(&db_path).map_err(|e| e.to_string())?;
             app.manage(Mutex::new(database));
+            // Manual review selections ("复习选中/复习该包") wait here for the popup.
+            app.manage(services::ReviewSession::default());
 
             // SPEC §8.2: 15s tick engine + tray "立即复习" fast path.
             let engine_state =
@@ -116,6 +118,9 @@ pub fn run() {
             commands::delete_deck,
             commands::delete_card,
             commands::update_card,
+            commands::search_cards,
+            commands::start_review,
+            commands::review_queue,
             commands::due_queue,
             commands::rate_card,
             commands::skip_card,

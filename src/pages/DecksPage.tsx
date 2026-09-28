@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type CardDto, type DeckOverview } from "../lib/api";
 
 const STATE_LABEL: Record<string, string> = {
@@ -9,6 +9,14 @@ const STATE_LABEL: Record<string, string> = {
   suspended: "已删除",
   archived: "已归档",
 };
+
+const FILTERS: { key: string; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "due", label: "已到期" },
+  { key: "new", label: "新卡" },
+  { key: "learning", label: "学习中" },
+  { key: "review", label: "复习中" },
+];
 
 function fmtDue(iso: string): string {
   const d = new Date(iso);
@@ -21,11 +29,15 @@ function fmtDue(iso: string): string {
   return past ? `已到期 ${label}` : label;
 }
 
-/** Deck management: rename / delete decks, edit / delete cards (SPEC §15.2). */
+/** Deck management + search/filter + manual review selection (SPEC §15.2). */
 export default function DecksPage() {
   const [overview, setOverview] = useState<DeckOverview[]>([]);
   const [openDeck, setOpenDeck] = useState<string | null>(null);
   const [cards, setCards] = useState<CardDto[]>([]);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [results, setResults] = useState<CardDto[] | null>(null);
+  const [selection, setSelection] = useState<Set<number>>(new Set());
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -34,16 +46,33 @@ export default function DecksPage() {
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
 
-  function loadOverview() {
+  const flatMode = query.trim() !== "" || filter !== "all";
+
+  const loadOverview = useCallback(() => {
     api
       .listOverview()
       .then(setOverview)
       .catch((e) => setError(String(e)));
-  }
+  }, []);
 
-  useEffect(loadOverview, []);
+  useEffect(loadOverview, [loadOverview]);
 
-  async function toggle(name: string) {
+  // Flat search/filter view (debounced).
+  useEffect(() => {
+    if (!flatMode) {
+      setResults(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      api
+        .searchCards(query.trim() || null, null, filter)
+        .then(setResults)
+        .catch((e) => setError(String(e)));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [query, filter, flatMode]);
+
+  async function toggleDeck(name: string) {
     if (openDeck === name) {
       setOpenDeck(null);
       return;
@@ -60,6 +89,53 @@ export default function DecksPage() {
   function flash(text: string) {
     setMsg(text);
     setError("");
+  }
+
+  function toggleSelect(id: number) {
+    setSelection((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll(list: CardDto[]) {
+    setSelection((s) => {
+      const allSelected = list.every((c) => s.has(c.id));
+      const next = new Set(s);
+      for (const c of list) {
+        if (allSelected) next.delete(c.id);
+        else next.add(c.id);
+      }
+      return next;
+    });
+  }
+
+  async function reviewSelected() {
+    setError("");
+    try {
+      const n = await api.startReview([...selection]);
+      flash(`已打开复习弹窗（${n} 张）`);
+      setSelection(new Set());
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function reviewDeck(name: string) {
+    setError("");
+    try {
+      const due = await api.searchCards(null, name, "due");
+      if (due.length === 0) {
+        setError(`「${name}」暂无到期卡片`);
+        return;
+      }
+      const n = await api.startReview(due.map((c) => c.id));
+      flash(`已打开「${name}」复习弹窗（${n} 张到期卡）`);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function doRename(oldName: string) {
@@ -94,10 +170,20 @@ export default function DecksPage() {
     try {
       await api.deleteCard(card.id);
       flash("卡片已删除");
-      if (openDeck) setCards(await api.listCards(openDeck));
-      loadOverview();
+      refreshCurrent();
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  function refreshCurrent() {
+    loadOverview();
+    if (openDeck) api.listCards(openDeck).then(setCards).catch(() => {});
+    if (flatMode) {
+      api
+        .searchCards(query.trim() || null, null, filter)
+        .then(setResults)
+        .catch(() => {});
     }
   }
 
@@ -114,101 +200,179 @@ export default function DecksPage() {
       await api.updateCard(editing, editTitle, editContent);
       flash("卡片已保存");
       setEditing(null);
-      if (openDeck) setCards(await api.listCards(openDeck));
+      refreshCurrent();
     } catch (e) {
       setError(String(e));
     }
   }
 
+  function cardRow(c: CardDto, showDeck: boolean) {
+    if (editing === c.id) {
+      return (
+        <div className="card-edit" key={c.id}>
+          <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+          <textarea
+            rows={5}
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+          />
+          <div>
+            <button className="btn primary" onClick={() => void doSaveEdit()}>
+              保存
+            </button>
+            <button className="btn" onClick={() => setEditing(null)}>
+              取消
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="deck-card-row" key={c.id}>
+        <input
+          type="checkbox"
+          checked={selection.has(c.id)}
+          onChange={() => toggleSelect(c.id)}
+        />
+        <span className="card-title-cell">
+          {c.title}
+          {showDeck && <small className="muted"> {c.deck} · {c.chapter}</small>}
+        </span>
+        <span className="muted small">
+          {STATE_LABEL[c.state] ?? c.state} · {fmtDue(c.dueAt)}
+        </span>
+        <span className="deck-actions">
+          <button className="btn small" onClick={() => startEdit(c)}>
+            编辑
+          </button>
+          <button className="btn small danger" onClick={() => void doDeleteCard(c)}>
+            删除
+          </button>
+        </span>
+      </div>
+    );
+  }
+
   return (
     <section className="page">
       <h1>卡包</h1>
+      <div className="toolbar">
+        <input
+          className="search-input"
+          placeholder="🔍 搜索卡片标题或内容…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+          {FILTERS.map((f) => (
+            <option key={f.key} value={f.key}>
+              {f.label}
+            </option>
+          ))}
+        </select>
+        <button
+          className="btn primary"
+          disabled={selection.size === 0}
+          onClick={() => void reviewSelected()}
+        >
+          复习选中（{selection.size}）
+        </button>
+        {selection.size > 0 && (
+          <button className="btn" onClick={() => setSelection(new Set())}>
+            清空选择
+          </button>
+        )}
+      </div>
       {msg && <p className="ok">{msg}</p>}
-      {overview.length === 0 && (
-        <p className="muted">还没有卡包——先到「导入」或「添加卡片」创建。</p>
-      )}
-      {overview.map((o) => (
-        <div className="card-block" key={o.name}>
+      {error && <p className="error">{error}</p>}
+
+      {flatMode ? (
+        <div className="card-block">
           <div className="deck-row">
-            <span className="deck-name" onClick={() => void toggle(o.name)} role="button">
-              {openDeck === o.name ? "▾" : "▸"} {o.name}
-            </span>
+            <label className="muted small">
+              <input
+                type="checkbox"
+                checked={results !== null && results.length > 0 && results.every((c) => selection.has(c.id))}
+                onChange={() => toggleAll(results ?? [])}
+              />
+              全选结果
+            </label>
             <span className="muted small">
-              {o.chapterCount} 章 · {o.cardCount} 卡 · 到期 {o.dueCount}
-            </span>
-            <span className="deck-actions">
-              <button
-                className="btn small"
-                onClick={() => {
-                  setRenaming(o.name);
-                  setRenameValue(o.name);
-                }}
-              >
-                重命名
-              </button>
-              <button className="btn small danger" onClick={() => void doDeleteDeck(o.name)}>
-                删除
-              </button>
+              {results === null ? "搜索中…" : `${results.length} 张卡片`}
             </span>
           </div>
-          {renaming === o.name && (
-            <div className="form-row">
-              <input
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && void doRename(o.name)}
-              />
-              <button className="btn primary" onClick={() => void doRename(o.name)}>
-                保存
-              </button>
-              <button className="btn" onClick={() => setRenaming(null)}>
-                取消
-              </button>
-            </div>
-          )}
-          {openDeck === o.name && (
-            <div className="deck-cards">
-              {cards.map((c) =>
-                editing === c.id ? (
-                  <div className="card-edit" key={c.id}>
-                    <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
-                    <textarea
-                      rows={5}
-                      value={editContent}
-                      onChange={(e) => setEditContent(e.target.value)}
-                    />
-                    <div>
-                      <button className="btn primary" onClick={() => void doSaveEdit()}>
-                        保存
-                      </button>
-                      <button className="btn" onClick={() => setEditing(null)}>
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="deck-card-row" key={c.id}>
-                    <span>{c.title}</span>
-                    <span className="muted small">
-                      {STATE_LABEL[c.state] ?? c.state} · {fmtDue(c.dueAt)}
-                    </span>
-                    <span className="deck-actions">
-                      <button className="btn small" onClick={() => startEdit(c)}>
-                        编辑
-                      </button>
-                      <button className="btn small danger" onClick={() => void doDeleteCard(c)}>
-                        删除
-                      </button>
-                    </span>
-                  </div>
-                ),
-              )}
-              {cards.length === 0 && <p className="muted small">该卡包暂无卡片</p>}
-            </div>
+          {(results ?? []).map((c) => cardRow(c, true))}
+          {results !== null && results.length === 0 && (
+            <p className="muted small">没有匹配的卡片</p>
           )}
         </div>
-      ))}
-      {error && <p className="error">{error}</p>}
+      ) : (
+        <>
+          {overview.length === 0 && (
+            <p className="muted">还没有卡包——先到「导入」或「添加卡片」创建。</p>
+          )}
+          {overview.map((o) => (
+            <div className="card-block" key={o.name}>
+              <div className="deck-row">
+                <span className="deck-name" onClick={() => void toggleDeck(o.name)} role="button">
+                  {openDeck === o.name ? "▾" : "▸"} {o.name}
+                </span>
+                <span className="muted small">
+                  {o.chapterCount} 章 · {o.cardCount} 卡 · 到期 {o.dueCount}
+                </span>
+                <span className="deck-actions">
+                  <button className="btn small" onClick={() => void reviewDeck(o.name)}>
+                    复习该包
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => {
+                      setRenaming(o.name);
+                      setRenameValue(o.name);
+                    }}
+                  >
+                    重命名
+                  </button>
+                  <button className="btn small danger" onClick={() => void doDeleteDeck(o.name)}>
+                    删除
+                  </button>
+                </span>
+              </div>
+              {renaming === o.name && (
+                <div className="form-row">
+                  <input
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && void doRename(o.name)}
+                  />
+                  <button className="btn primary" onClick={() => void doRename(o.name)}>
+                    保存
+                  </button>
+                  <button className="btn" onClick={() => setRenaming(null)}>
+                    取消
+                  </button>
+                </div>
+              )}
+              {openDeck === o.name && (
+                <div className="deck-cards">
+                  {cards.length > 0 && (
+                    <label className="muted small">
+                      <input
+                        type="checkbox"
+                        checked={cards.every((c) => selection.has(c.id))}
+                        onChange={() => toggleAll(cards)}
+                      />
+                      全选本包（{cards.length} 张）
+                    </label>
+                  )}
+                  {cards.map((c) => cardRow(c, false))}
+                  {cards.length === 0 && <p className="muted small">该卡包暂无卡片</p>}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
     </section>
   );
 }
