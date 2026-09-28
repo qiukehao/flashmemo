@@ -292,19 +292,32 @@ body {
   padding: 16px 18px;
   user-select: text;
 }
+/* Before the answer is revealed: question + button centered in the panel. */
+.popup-body-centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
 .popup-front {
   font-size: 18px;
   font-weight: 600;
   line-height: 1.5;
+  text-align: center;
+  width: 100%;
 }
 .popup-reveal {
-  margin-top: 18px;
+  margin-top: 22px;
   border: 1px dashed #a16207;
   background: transparent;
   color: #713f12;
-  border-radius: 8px;
-  padding: 8px 18px;
+  border-radius: 10px;
+  padding: 13px 36px;
+  font-size: 15px;
   cursor: pointer;
+}
+.popup-reveal:hover {
+  background: #fef9c3;
 }
 .popup-back {
   margin-top: 14px;

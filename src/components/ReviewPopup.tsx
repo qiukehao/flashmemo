@@ -226,7 +226,7 @@ export default function ReviewPopup() {
         </button>
       </header>
 
-      <div className="popup-body">
+      <div className={`popup-body ${revealed ? "" : "popup-body-centered"}`}>
         <div className="popup-front">{card.title}</div>
         {revealed ? (
           <>
