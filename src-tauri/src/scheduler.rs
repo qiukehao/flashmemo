@@ -78,7 +78,6 @@ fn step_due(steps: &[u32], idx: usize, now: DateTime<Utc>) -> DateTime<Utc> {
 fn outcome(
     state: CardState,
     learning_step: usize,
-    now: DateTime<Utc>,
     memory: Option<MemoryState>,
     due_at: DateTime<Utc>,
 ) -> ScheduleOutcome {
@@ -117,7 +116,6 @@ fn fsrs_outcome(
     Ok(outcome(
         CardState::Review,
         0,
-        now,
         Some(item.memory),
         now + Duration::minutes(minutes(item.interval)),
     ))
@@ -141,7 +139,6 @@ pub fn review(
                 Ok(outcome(
                     CardState::Relearning,
                     0,
-                    now,
                     Some(states.again.memory),
                     step_due(steps, 0, now),
                 ))
@@ -157,7 +154,6 @@ pub fn review(
                     CardState::Learning
                 },
                 0,
-                now,
                 memory_state(card),
                 step_due(steps, 0, now),
             )),
@@ -171,7 +167,6 @@ pub fn review(
                 Ok(outcome(
                     CardState::Learning,
                     idx,
-                    now,
                     memory_state(card),
                     step_due(steps, idx, now),
                 ))
@@ -184,7 +179,6 @@ pub fn review(
                     Ok(outcome(
                         CardState::Learning,
                         idx,
-                        now,
                         memory_state(card),
                         step_due(steps, idx, now),
                     ))
@@ -195,7 +189,7 @@ pub fn review(
     }
 }
 
-pub fn skip(card: &CardSched, now: DateTime<Utc>, cfg: &ScheduleConfig) -> DateTime<Utc> {
+pub fn skip(_card: &CardSched, now: DateTime<Utc>, cfg: &ScheduleConfig) -> DateTime<Utc> {
     now + Duration::minutes(cfg.skip_delay_min as i64)
 }
 
@@ -325,7 +319,7 @@ mod tests {
         assert!(out.stability.is_some());
         let d = days(&out, now);
         assert!(
-            d >= 1.0 && d <= 7.0,
+            (1.0..=7.0).contains(&d),
             "graduation interval {d} not in 1..=7d"
         );
     }
@@ -336,7 +330,10 @@ mod tests {
         let out = review(&new_card(), Rating::Easy, now, &cfg()).unwrap();
         assert_eq!(out.state, CardState::Review);
         let d = days(&out, now);
-        assert!(d >= 2.0 && d <= 20.0, "easy graduation {d} not in 2..=20d");
+        assert!(
+            (2.0..=20.0).contains(&d),
+            "easy graduation {d} not in 2..=20d"
+        );
     }
 
     #[test]
