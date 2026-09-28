@@ -1,0 +1,490 @@
+//! Service layer: business orchestration over db + parser + scheduler. All
+//! functions here are plain Rust (no Tauri types) so they are directly testable
+//! against an in-memory database. `commands.rs` is a thin invoke wrapper.
+
+use crate::db::{self, Card, Db, NewCard};
+use crate::import::{self, ImportReport};
+use crate::parser::{parse_markdown, ParsedDeck};
+use crate::scheduler::{self, CardSched, CardState, Rating, ScheduleConfig};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardDto {
+    pub id: i64,
+    pub deck: String,
+    pub chapter: String,
+    pub title: String,
+    pub content_md: String,
+    pub state: String,
+    pub due_at: String,
+    pub learning_step: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckOverview {
+    pub name: String,
+    pub chapter_count: i64,
+    pub card_count: i64,
+    pub due_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFile {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub decks: u32,
+    pub chapters: u32,
+    pub cards: u32,
+    pub conflicts: u32,
+}
+
+fn state_to_str(s: CardState) -> &'static str {
+    match s {
+        CardState::New => "new",
+        CardState::Learning => "learning",
+        CardState::Review => "review",
+        CardState::Relearning => "relearning",
+    }
+}
+
+fn state_from_str(s: &str) -> Option<CardState> {
+    match s {
+        "new" => Some(CardState::New),
+        "learning" => Some(CardState::Learning),
+        "review" => Some(CardState::Review),
+        "relearning" => Some(CardState::Relearning),
+        _ => None,
+    }
+}
+
+fn rating_from_str(s: &str) -> Option<Rating> {
+    match s {
+        "again" => Some(Rating::Again),
+        "hard" => Some(Rating::Hard),
+        "good" => Some(Rating::Good),
+        "easy" => Some(Rating::Easy),
+        _ => None,
+    }
+}
+
+/// SPEC §14 review_log rating codes.
+fn rating_num(r: Rating) -> i64 {
+    match r {
+        Rating::Again => 1,
+        Rating::Hard => 2,
+        Rating::Good => 3,
+        Rating::Easy => 4,
+    }
+}
+
+fn to_dto(c: &Card) -> CardDto {
+    CardDto {
+        id: c.id,
+        deck: c.deck.clone(),
+        chapter: c.chapter.clone(),
+        title: c.title.clone(),
+        content_md: c.content_md.clone(),
+        state: c.state.clone(),
+        due_at: db::fmt_time(c.due_at),
+        learning_step: c.learning_step,
+    }
+}
+
+fn to_sched(c: &Card) -> CardSched {
+    CardSched {
+        state: state_from_str(&c.state).unwrap_or(CardState::New),
+        stability: c.stability.map(|s| s as f32),
+        difficulty: c.difficulty.map(|d| d as f32),
+        learning_step: c.learning_step.max(0) as usize,
+        last_review_at: c.last_review_at,
+    }
+}
+
+/// Settings-driven config; falls back to SPEC §7.4 defaults per key.
+fn cfg_from_db(db: &Db) -> ScheduleConfig {
+    let mut cfg = ScheduleConfig::default();
+    if let Some(v) = db.get_setting("steps_min").ok().flatten() {
+        let steps: Vec<u32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if !steps.is_empty() {
+            cfg.steps_min = steps;
+        }
+    }
+    if let Some(v) = db.get_setting("retention").ok().flatten() {
+        if let Ok(r) = v.parse::<f32>() {
+            let clamped = r.clamp(0.80, 0.95);
+            cfg.retention = clamped;
+        }
+    }
+    if let Some(v) = db.get_setting("skip_delay_min").ok().flatten() {
+        if let Ok(m) = v.parse::<u32>() {
+            cfg.skip_delay_min = m.clamp(10, 120);
+        }
+    }
+    cfg
+}
+
+pub fn add_card(
+    db: &Db,
+    deck: &str,
+    chapter: &str,
+    title: &str,
+    content_md: &str,
+) -> Result<CardDto, String> {
+    if title.trim().is_empty() {
+        return Err("卡片标题不能为空".into());
+    }
+    let id = db
+        .insert_card(
+            &NewCard {
+                deck: deck.trim().to_string(),
+                chapter: chapter.trim().to_string(),
+                title: title.trim().to_string(),
+                content_md: content_md.to_string(),
+                source_file: None,
+            },
+            Utc::now(),
+        )
+        .map_err(|e| e.to_string())?;
+    db.get_card(id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared after insert".into())
+}
+
+pub fn import_markdown(
+    db: &Db,
+    files: &[ImportFile],
+    prefer_file: bool,
+) -> Result<ImportReport, String> {
+    let decks = parse_files(files);
+    import::import(db, &decks, None, prefer_file).map_err(|e| e.to_string())
+}
+
+/// Parse without inserting: SPEC §5.3 import preview (N decks / M chapters / K
+/// cards), plus how many locally-edited cards would conflict.
+pub fn preview_import(db: &Db, files: &[ImportFile]) -> Result<ImportPreview, String> {
+    let decks = parse_files(files);
+    let mut preview = ImportPreview {
+        decks: decks.len() as u32,
+        ..Default::default()
+    };
+    for d in &decks {
+        preview.chapters += d.chapters.len() as u32;
+        for ch in &d.chapters {
+            preview.cards += ch.cards.len() as u32;
+            for card in &ch.cards {
+                if existing_local_edit_count(db, &d.name, &ch.name, &card.title) > 0 {
+                    preview.conflicts += 1;
+                }
+            }
+        }
+    }
+    Ok(preview)
+}
+
+fn existing_local_edit_count(db: &Db, deck: &str, chapter: &str, title: &str) -> i64 {
+    db.0.query_row(
+        "SELECT COUNT(*) FROM card c
+             JOIN chapter ch ON ch.id = c.chapter_id
+             JOIN deck d ON d.id = ch.deck_id
+             WHERE d.name = ?1 AND ch.name = ?2 AND c.title = ?3 AND c.locally_edited = 1",
+        rusqlite::params![deck, chapter, title],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+fn parse_files(files: &[ImportFile]) -> Vec<ParsedDeck> {
+    let mut decks = Vec::new();
+    for f in files {
+        let stem = std::path::Path::new(&f.name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("未命名卡包")
+            .to_string();
+        decks.extend(parse_markdown(&f.content, &stem));
+    }
+    decks
+}
+
+pub fn list_overview(db: &Db) -> Result<Vec<DeckOverview>, String> {
+    let sql = "SELECT d.name,
+        COUNT(DISTINCT ch.id) AS chapters,
+        COUNT(c.id) AS cards,
+        COALESCE(SUM(CASE WHEN c.due_at <= ?1 AND c.state NOT IN ('suspended','archived')
+                          THEN 1 ELSE 0 END), 0) AS due
+        FROM deck d
+        LEFT JOIN chapter ch ON ch.deck_id = d.id
+        LEFT JOIN card c ON c.chapter_id = ch.id
+        GROUP BY d.id ORDER BY d.name";
+    let mut stmt = db.0.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([db::fmt_time(Utc::now())], |r| {
+            Ok(DeckOverview {
+                name: r.get(0)?,
+                chapter_count: r.get(1)?,
+                card_count: r.get(2)?,
+                due_count: r.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+pub fn due_queue(db: &Db, limit: i64) -> Result<Vec<CardDto>, String> {
+    Ok(db
+        .list_due(Utc::now(), limit)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(to_dto)
+        .collect())
+}
+
+/// Rate a card: scheduler decides, then card update + review_log row commit in
+/// one transaction (SPEC §17: a crash must never lose a rating).
+pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> {
+    let r = rating_from_str(rating).ok_or_else(|| format!("未知评分: {rating}"))?;
+    let card = db
+        .get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    let cfg = cfg_from_db(db);
+    let now = Utc::now();
+    let out = scheduler::review(&to_sched(&card), r, now, &cfg).map_err(|e| e.to_string())?;
+
+    let lapsed = card.state == "review" && r == Rating::Again;
+    let tx = db.0.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE card SET state=?1, stability=?2, difficulty=?3, due_at=?4,
+         last_review_at=?5, reps=reps+1, lapses=lapses+?6, learning_step=?7
+         WHERE id=?8",
+        rusqlite::params![
+            state_to_str(out.state),
+            out.stability,
+            out.difficulty,
+            db::fmt_time(out.due_at),
+            db::fmt_time(now),
+            i64::from(lapsed),
+            out.learning_step as i64,
+            card_id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO review_log(card_id, rating, state_before, stability, difficulty,
+         scheduled_interval, reviewed_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            card_id,
+            rating_num(r),
+            card.state,
+            out.stability,
+            out.difficulty,
+            (out.due_at - now).num_minutes().to_string(),
+            db::fmt_time(now),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared after rating".into())
+}
+
+/// SPEC §7.1: skip rates nothing — no review_log row, only a postponed due_at.
+pub fn skip_card(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    let card = db
+        .get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    let cfg = cfg_from_db(db);
+    let due = scheduler::skip(&to_sched(&card), Utc::now(), &cfg);
+    db.0.execute(
+        "UPDATE card SET due_at=?1 WHERE id=?2",
+        rusqlite::params![db::fmt_time(due), card_id],
+    )
+    .map_err(|e| e.to_string())?;
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared after skip".into())
+}
+
+pub fn preview_intervals(db: &Db, card_id: i64) -> Result<Vec<Option<f64>>, String> {
+    let card = db
+        .get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    let cfg = cfg_from_db(db);
+    let p = scheduler::preview(&to_sched(&card), Utc::now(), &cfg).map_err(|e| e.to_string())?;
+    Ok(p.to_vec())
+}
+
+/// Total due count (for tray tooltip, home page and engine tick).
+pub fn due_count(db: &Db) -> Result<i64, String> {
+    db.0.query_row(
+        "SELECT COUNT(*) FROM card
+             WHERE due_at <= ?1 AND state NOT IN ('suspended','archived')",
+        [db::fmt_time(Utc::now())],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn list_settings(db: &Db) -> Result<Vec<(String, String)>, String> {
+    db.list_settings().map_err(|e| e.to_string())
+}
+
+pub fn set_settings(db: &Db, map: &[(String, String)]) -> Result<(), String> {
+    for (k, v) in map {
+        db.set_setting(k, v).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> Db {
+        Db::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn add_card_creates_new_due_now() {
+        let d = db();
+        let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
+        assert_eq!(dto.state, "new");
+        assert_eq!(dto.learning_step, 0);
+        let c = d.get_card(dto.id).unwrap().unwrap();
+        assert!(c.due_at <= Utc::now());
+    }
+
+    #[test]
+    fn add_card_rejects_blank_title() {
+        let d = db();
+        assert!(add_card(&d, "D", "C", "  ", "x").is_err());
+    }
+
+    #[test]
+    fn rate_persists_review_log() {
+        let mut d = db();
+        let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
+        let after = rate(&mut d, dto.id, "good").unwrap();
+        // Good on a new card advances to learning step 1 (5 minutes).
+        assert_eq!(after.state, "learning");
+        assert_eq!(after.learning_step, 1);
+        let (n, rating, before): (i64, i64, String) =
+            d.0.query_row(
+                "SELECT COUNT(*), rating, state_before FROM review_log GROUP BY id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((n, rating, before.as_str()), (1, 3, "new"));
+        let due: String =
+            d.0.query_row("SELECT due_at FROM card WHERE id=?1", [dto.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(db::parse_time(&due) > Utc::now());
+    }
+
+    #[test]
+    fn rate_unknown_rating_errors() {
+        let mut d = db();
+        let dto = add_card(&d, "D", "C", "T", "x").unwrap();
+        assert!(rate(&mut d, dto.id, "excellent").is_err());
+    }
+
+    #[test]
+    fn due_queue_orders_oldest_due_first() {
+        let d = db();
+        let a = add_card(&d, "D", "C", "卡A", "x").unwrap();
+        let b = add_card(&d, "D", "C", "卡B", "x").unwrap();
+        d.0.execute(
+            "UPDATE card SET due_at=?1 WHERE id=?2",
+            rusqlite::params![
+                db::fmt_time(Utc::now() - chrono::Duration::minutes(10)),
+                a.id
+            ],
+        )
+        .unwrap();
+        d.0.execute(
+            "UPDATE card SET due_at=?1 WHERE id=?2",
+            rusqlite::params![
+                db::fmt_time(Utc::now() - chrono::Duration::minutes(1)),
+                b.id
+            ],
+        )
+        .unwrap();
+        let q = due_queue(&d, 10).unwrap();
+        assert_eq!(
+            q.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            ["卡A", "卡B"]
+        );
+    }
+
+    #[test]
+    fn preview_reports_counts_and_conflicts() {
+        let d = db();
+        let files = vec![ImportFile {
+            name: "mysql.md".into(),
+            content: "# MySQL\n\n## 事务\n\n### ACID\n要点\n\n### 隔离\n要点\n".into(),
+        }];
+        import_markdown(&d, &files, false).unwrap();
+        let p = preview_import(&d, &files).unwrap();
+        assert_eq!((p.decks, p.chapters, p.cards), (1, 1, 2));
+        assert_eq!(p.conflicts, 0);
+        d.0.execute("UPDATE card SET locally_edited=1 WHERE title='ACID'", [])
+            .unwrap();
+        let p = preview_import(&d, &files).unwrap();
+        assert_eq!(p.conflicts, 1);
+    }
+
+    #[test]
+    fn skip_postpones_without_log() {
+        let d = db();
+        let dto = add_card(&d, "D", "C", "T", "x").unwrap();
+        let after = skip_card(&d, dto.id).unwrap();
+        let c = d.get_card(dto.id).unwrap().unwrap();
+        assert!(c.due_at > Utc::now());
+        assert_eq!(after.state, "new");
+        let n: i64 =
+            d.0.query_row("SELECT COUNT(*) FROM review_log", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(n, 0, "skip must not write a review log");
+    }
+
+    #[test]
+    fn preview_intervals_all_present() {
+        let d = db();
+        let dto = add_card(&d, "D", "C", "T", "x").unwrap();
+        let p = preview_intervals(&d, dto.id).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_eq!(p[0], Some(1.0));
+        assert!(p[3].unwrap() > 1000.0);
+    }
+
+    #[test]
+    fn settings_roundtrip_via_service() {
+        let d = db();
+        set_settings(&d, &[("popup_interval_min".into(), "15".into())]).unwrap();
+        assert_eq!(
+            list_settings(&d).unwrap(),
+            vec![("popup_interval_min".into(), "15".into())]
+        );
+    }
+}

@@ -158,6 +158,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn list_settings(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT key, value FROM settings ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     pub(crate) fn upsert_deck(&self, name: &str, now: DateTime<Utc>) -> rusqlite::Result<i64> {
         self.0.execute(
             "INSERT INTO deck(name, created_at) VALUES(?1, ?2)
