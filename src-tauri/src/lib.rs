@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod db;
+pub mod engine;
 pub mod import;
 pub mod parser;
 pub mod scheduler;
@@ -47,6 +48,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // SPEC §14: data lives in %APPDATA%\FlashMemo.
             let appdata =
@@ -56,6 +58,12 @@ pub fn run() {
                 .join("data.db");
             let database = db::Db::open(&db_path).map_err(|e| e.to_string())?;
             app.manage(Mutex::new(database));
+
+            // SPEC §8.2: 15s tick engine + tray "立即复习" fast path.
+            let engine_state =
+                std::sync::Arc::new(std::sync::Mutex::new(engine::EngineState::default()));
+            engine::spawn(app.handle().clone(), engine_state.clone());
+            engine::listen_force_review(app.handle(), engine_state);
 
             // SPEC §13: tray menu.
             let review_now = MenuItem::with_id(app, "review_now", "立即复习", true, None::<&str>)?;
