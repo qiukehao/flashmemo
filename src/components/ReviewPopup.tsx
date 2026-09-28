@@ -3,6 +3,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardDto, type RatingName } from "../lib/api";
 import { formatGap, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
+import { htmlToMarkdown, insertNoteBlock, wrapSelection } from "../lib/wysiwyg";
 
 const appWindow = getCurrentWebviewWindow();
 
@@ -26,12 +27,12 @@ export default function ReviewPopup() {
   const [previews, setPreviews] = useState<number[]>([]);
   const [hintCount, setHintCount] = useState(HINT_MAX);
   const hintSaved = useRef(true);
-  // Annotation editing (SPEC §9.2).
+  // WYSIWYG annotation editing (SPEC §9.2): edit the rendered card in place.
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
   const savedSnapshot = useRef("");
+  const autosaveTimer = useRef<number | null>(null);
 
   const card = queue[idx];
   const loading = queue.length === 0;
@@ -71,58 +72,60 @@ export default function ReviewPopup() {
     }
   }, [card, hintCount]);
 
-  /** Persist the draft if it differs from the last saved snapshot. */
-  const flushDraft = useCallback(async () => {
-    if (!card) return;
-    const current = draft;
-    if (current === savedSnapshot.current) return;
+  /** Serialize the edited DOM back to markdown and persist if it changed. */
+  const flushEditor = useCallback(async () => {
+    const editor = editorRef.current;
+    if (!editor || !card) return;
+    const md = htmlToMarkdown(editor.innerHTML);
+    if (md === savedSnapshot.current) return;
     setSaveState("saving");
     try {
-      const updated = await api.saveCardContent(card.id, current);
-      savedSnapshot.current = current;
+      const updated = await api.saveCardContent(card.id, md);
+      savedSnapshot.current = md;
       setQueue((q) => q.map((c) => (c.id === updated.id ? updated : c)));
       setSaveState("saved");
     } catch {
       setSaveState("idle");
     }
-  }, [card, draft]);
+  }, [card]);
 
-  // Debounced autosave while editing (SPEC §9.2: 防抖 800ms，绝不丢批注).
-  useEffect(() => {
-    if (!editing) return;
-    if (draft === savedSnapshot.current) return;
-    const t = setTimeout(() => void flushDraft(), AUTOSAVE_MS);
-    return () => clearTimeout(t);
-  }, [draft, editing, flushDraft]);
+  /** Debounced autosave while typing (SPEC §9.2: 防抖，绝不丢批注). */
+  const scheduleAutosave = useCallback(() => {
+    setSaveState("idle");
+    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(() => void flushEditor(), AUTOSAVE_MS);
+  }, [flushEditor]);
 
   function startEditing() {
     if (!card) return;
-    setDraft(card.contentMd);
     savedSnapshot.current = card.contentMd;
     setSaveState("idle");
     setEditing(true);
-    setTimeout(() => textareaRef.current?.focus(), 0);
+    setTimeout(() => editorRef.current?.focus(), 0);
   }
 
   const stopEditing = useCallback(async () => {
-    await flushDraft();
+    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
+    await flushEditor();
     setEditing(false);
-  }, [flushDraft]);
+  }, [flushEditor]);
 
-  /** Wrap the current textarea selection with the annotation syntax (§9.1). */
-  function wrapSelection(marker: string) {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    const { selectionStart, selectionEnd, value } = ta;
-    const selected = value.slice(selectionStart, selectionEnd);
-    const next =
-      value.slice(0, selectionStart) + marker + selected + marker + value.slice(selectionEnd);
-    setDraft(next);
-    const pos = selectionStart + marker.length + selected.length + marker.length;
-    setTimeout(() => {
-      ta.focus();
-      ta.setSelectionRange(selected ? pos : selectionStart + marker.length, pos);
-    }, 0);
+  /** Toolbar actions: apply the annotation trio to the live selection. */
+  function applyBold() {
+    const editor = editorRef.current;
+    if (editor) wrapSelection(editor, "strong");
+  }
+  function applyHighlight() {
+    const editor = editorRef.current;
+    if (editor) wrapSelection(editor, "mark");
+  }
+  function applyNote() {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const sel = window.getSelection();
+    const collapsed = !sel || sel.isCollapsed;
+    if (collapsed) insertNoteBlock(editor);
+    else wrapSelection(editor, "div", "card-note");
   }
 
   const advance = useCallback(() => {
@@ -137,25 +140,25 @@ export default function ReviewPopup() {
 
   /** SPEC §8.4: Esc/✕ postpone unrated cards by the skip delay (no rating). */
   const skipCurrent = useCallback(async () => {
-    await flushDraft();
+    if (editing) await flushEditor();
     if (card) await api.skipCard(card.id).catch(() => {});
     advance();
-  }, [card, advance, flushDraft]);
+  }, [card, advance, flushEditor, editing]);
 
   const closeAll = useCallback(async () => {
-    await flushDraft();
+    if (editing) await flushEditor();
     for (const c of queue.slice(idx)) await api.skipCard(c.id).catch(() => {});
     closeWindow();
-  }, [queue, idx, flushDraft]);
+  }, [queue, idx, flushEditor, editing]);
 
   const rate = useCallback(
     async (name: RatingName) => {
       if (!card || !revealed) return;
-      await flushDraft();
+      if (editing) await flushEditor();
       await api.rateCard(card.id, name).catch(() => {});
       advance();
     },
-    [card, revealed, advance, flushDraft],
+    [card, revealed, advance, flushEditor, editing],
   );
 
   const act = useCallback(
@@ -174,7 +177,7 @@ export default function ReviewPopup() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // While annotating, the keyboard belongs to the textarea: Esc exits the
+      // While annotating, the keyboard belongs to the editor: Esc exits the
       // editor (SPEC §9.2), Ctrl+Enter finishes it.
       if (editing) {
         if (e.key === "Escape") {
@@ -224,42 +227,43 @@ export default function ReviewPopup() {
         {editing ? (
           <div className="popup-edit">
             <div className="popup-edit-toolbar">
-              <button className="btn small" onClick={() => wrapSelection("**")} title="加粗 Ctrl+B">
+              <button className="btn small" onClick={applyBold} title="加粗（Ctrl+B）">
                 <b>B</b>
               </button>
-              <button className="btn small" onClick={() => wrapSelection("==")} title="高亮">
+              <button className="btn small" onClick={applyHighlight} title="高亮选中文字">
                 🖍 高亮
               </button>
-              <button className="btn small" onClick={() => wrapSelection("%%")} title="备注">
+              <button className="btn small" onClick={applyNote} title="插入/包裹备注">
                 📝 备注
               </button>
               <span className="edit-status muted small">
-                {saveState === "saving" ? "保存中…" : saveState === "saved" ? "已保存" : "编辑中"}
+                {saveState === "saving"
+                  ? "保存中…"
+                  : saveState === "saved"
+                    ? "已保存"
+                    : "编辑中（所见即所得）"}
               </span>
               <button className="btn small primary" onClick={() => void stopEditing()}>
                 完成
               </button>
             </div>
-            <textarea
-              ref={textareaRef}
-              className="popup-edit-input"
-              value={draft}
+            {/* WYSIWYG: the rendered card itself is editable in place. */}
+            <div
+              key={card.id}
+              ref={editorRef}
+              className="popup-edit-wysiwyg popup-back"
+              contentEditable
+              suppressContentEditableWarning
               spellCheck={false}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                setSaveState("idle");
-              }}
+              onInput={scheduleAutosave}
               onKeyDown={(e) => {
                 if (e.key === "b" && (e.ctrlKey || e.metaKey)) {
                   e.preventDefault();
-                  wrapSelection("**");
+                  applyBold();
                 }
               }}
+              dangerouslySetInnerHTML={{ __html: renderCard(card.contentMd) }}
             />
-            <div className="popup-edit-preview">
-              <div className="muted small">实时预览</div>
-              <div dangerouslySetInnerHTML={{ __html: renderCard(draft) }} />
-            </div>
           </div>
         ) : revealed ? (
           <div

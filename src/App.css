@@ -427,22 +427,20 @@ body {
   padding: 3px 8px;
   font-size: 12px;
 }
-.popup-edit-input {
+
+.popup-edit-wysiwyg {
   flex: 1;
-  min-height: 60px;
-  border: 1px solid #fde68a;
+  min-height: 90px;
+  overflow: auto;
+  border: 1px dashed #fde68a;
   border-radius: 8px;
   padding: 8px 10px;
-  font-family: inherit;
-  font-size: 13px;
-  resize: none;
   background: #fffef8;
+  outline: none;
 }
-.popup-edit-preview {
-  flex: 1;
-  min-height: 48px;
-  overflow: auto;
-  border-top: 1px dashed #fde68a;
-  padding-top: 6px;
-  font-size: 13px;
+.popup-edit-wysiwyg:focus {
+  border-color: #f59e0b;
+}
+.popup-edit-wysiwyg .card-note .card-note-icon {
+  user-select: none;
 }
