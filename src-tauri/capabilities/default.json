@@ -4,6 +4,6 @@
   "description": "Capability for the main window",
   "windows": ["main", "popup"],
   "permissions": [
-    "core:default",
+    "core:default"
   ]
 }
