@@ -158,7 +158,7 @@ impl Db {
         Ok(())
     }
 
-    fn upsert_deck(&self, name: &str, now: DateTime<Utc>) -> rusqlite::Result<i64> {
+    pub(crate) fn upsert_deck(&self, name: &str, now: DateTime<Utc>) -> rusqlite::Result<i64> {
         self.0.execute(
             "INSERT INTO deck(name, created_at) VALUES(?1, ?2)
              ON CONFLICT(name) DO NOTHING",
@@ -168,7 +168,7 @@ impl Db {
             .query_row("SELECT id FROM deck WHERE name = ?1", [name], |r| r.get(0))
     }
 
-    fn upsert_chapter(&self, deck_id: i64, name: &str) -> rusqlite::Result<i64> {
+    pub(crate) fn upsert_chapter(&self, deck_id: i64, name: &str) -> rusqlite::Result<i64> {
         let existing: Option<i64> = self
             .0
             .query_row(
@@ -266,6 +266,48 @@ impl Db {
         );
         let mut stmt = self.0.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![fmt_time(now), limit], Self::row_to_card)?;
+        rows.collect()
+    }
+
+    pub fn find_card_in_chapter(
+        &self,
+        chapter_id: i64,
+        title: &str,
+    ) -> rusqlite::Result<Option<Card>> {
+        let sql = format!(
+            "{} WHERE c.chapter_id = ?1 AND c.title = ?2",
+            Self::CARD_SELECT
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params![chapter_id, title])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_card(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Replace body content (import path). `clear_local_edit` is the SPEC §5.3
+    /// "以文件为准" option; otherwise the locally_edited flag is untouched.
+    pub fn update_card_content(
+        &self,
+        card_id: i64,
+        content_md: &str,
+        source_file: Option<&str>,
+        clear_local_edit: bool,
+    ) -> rusqlite::Result<()> {
+        self.0.execute(
+            "UPDATE card SET content_md = ?1, source_file = ?2,
+             locally_edited = CASE WHEN ?3 THEN 0 ELSE locally_edited END
+             WHERE id = ?4",
+            rusqlite::params![content_md, source_file, clear_local_edit, card_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_source_cards(&self, source_file: &str) -> rusqlite::Result<Vec<Card>> {
+        let sql = format!("{} WHERE c.source_file = ?1", Self::CARD_SELECT);
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map([source_file], Self::row_to_card)?;
         rows.collect()
     }
 }
