@@ -1,8 +1,11 @@
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import "./App.css";
+import MainShell from "./MainShell";
+import ReviewPopup from "./components/ReviewPopup";
+
 export default function App() {
-  return (
-    <main style={{ padding: 24, fontFamily: "system-ui" }}>
-      <h1>闪记 FlashMemo</h1>
-      <p>管理面板骨架 —— 页面在后续任务中接入。</p>
-    </main>
-  );
+  // One bundle, two windows: the popup window renders the review flow,
+  // everything else is the management panel (SPEC §15).
+  const isPopup = getCurrentWebviewWindow().label === "popup";
+  return isPopup ? <ReviewPopup /> : <MainShell />;
 }
