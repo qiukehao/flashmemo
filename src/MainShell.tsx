@@ -1,17 +1,18 @@
 import { useState } from "react";
+import type { TabKey } from "./lib/tabs";
 import AddCardPage from "./pages/AddCardPage";
+import DecksPage from "./pages/DecksPage";
 import HomePage from "./pages/HomePage";
 import ImportPage from "./pages/ImportPage";
 import SettingsPage from "./pages/SettingsPage";
 
-const TABS = [
+const TABS: { key: TabKey; label: string }[] = [
   { key: "home", label: "首页" },
+  { key: "decks", label: "卡包" },
   { key: "import", label: "导入" },
   { key: "add", label: "添加卡片" },
   { key: "settings", label: "设置" },
-] as const;
-
-type TabKey = (typeof TABS)[number]["key"];
+];
 
 export default function MainShell() {
   const [tab, setTab] = useState<TabKey>("home");
@@ -39,6 +40,7 @@ export default function MainShell() {
       </nav>
       <main className="shell-main">
         {tab === "home" && <HomePage key={bump} onNavigate={navigate} />}
+        {tab === "decks" && <DecksPage key={bump} />}
         {tab === "import" && <ImportPage key={bump} onDone={navigate} />}
         {tab === "add" && <AddCardPage key={bump} onSaved={navigate} />}
         {tab === "settings" && <SettingsPage key={bump} />}

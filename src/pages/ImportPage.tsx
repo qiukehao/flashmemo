@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { TabKey } from "../lib/tabs";
 import {
   api,
   type ImportFile,
@@ -19,7 +20,7 @@ function readText(file: File): Promise<ImportFile> {
 export default function ImportPage({
   onDone,
 }: {
-  onDone: (tab: "home" | "import" | "add" | "settings") => void;
+  onDone: (tab: TabKey) => void;
 }) {
   const [files, setFiles] = useState<ImportFile[]>([]);
   const [preview, setPreview] = useState<ImportPreview | null>(null);

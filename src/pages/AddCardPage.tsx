@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { TabKey } from "../lib/tabs";
 import { api, type DeckOverview } from "../lib/api";
 import { renderCard } from "../lib/markdown";
 
@@ -7,7 +8,7 @@ const NEW = "__new__";
 export default function AddCardPage({
   onSaved,
 }: {
-  onSaved: (tab: "home" | "import" | "add" | "settings") => void;
+  onSaved: (tab: TabKey) => void;
 }) {
   const [overview, setOverview] = useState<DeckOverview[]>([]);
   const [deckSel, setDeckSel] = useState("");

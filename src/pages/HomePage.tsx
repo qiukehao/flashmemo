@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { api } from "../lib/api";
+import type { TabKey } from "../lib/tabs";
 
 export default function HomePage({
   onNavigate,
 }: {
-  onNavigate: (tab: "home" | "import" | "add" | "settings") => void;
+  onNavigate: (tab: TabKey) => void;
 }) {
   const [due, setDue] = useState<number | null>(null);
 

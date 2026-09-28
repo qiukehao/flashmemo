@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardDto, type RatingName } from "../lib/api";
 import { formatInterval, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
+
+const appWindow = getCurrentWebviewWindow();
+
+function closeWindow() {
+  appWindow.close().catch(() => {});
+}
 
 const RATINGS: { name: RatingName; label: string; idx: number }[] = [
   { name: "again", label: "重来", idx: 0 },
@@ -32,9 +39,9 @@ export default function ReviewPopup() {
         setQueue(q);
         setHintCount(Number.parseInt(settings.hint_shown_count ?? "0", 10) || 0);
         hintSaved.current = false;
-        if (q.length === 0) window.close();
+        if (q.length === 0) closeWindow();
       } catch {
-        window.close();
+        closeWindow();
       }
     })();
   }, []);
@@ -58,12 +65,12 @@ export default function ReviewPopup() {
 
   const advance = useCallback(() => {
     setRevealed(false);
-    setIdx((i) => {
-      if (i + 1 < queue.length) return i + 1;
-      window.close();
-      return i;
-    });
-  }, [queue.length]);
+    if (idx + 1 < queue.length) {
+      setIdx(idx + 1);
+    } else {
+      closeWindow();
+    }
+  }, [idx, queue.length]);
 
   /** SPEC §8.4: Esc/✕ postpone unrated cards by the skip delay (no rating). */
   const skipCurrent = useCallback(async () => {
@@ -73,7 +80,7 @@ export default function ReviewPopup() {
 
   const closeAll = useCallback(async () => {
     for (const c of queue.slice(idx)) await api.skipCard(c.id).catch(() => {});
-    window.close();
+    closeWindow();
   }, [queue, idx]);
 
   const rate = useCallback(
@@ -118,8 +125,9 @@ export default function ReviewPopup() {
 
   return (
     <div className="popup-root">
-      <header className="popup-header">
-        <span className="popup-crumb">
+      {/* Borderless window: this header is the drag region (SPEC §8.3). */}
+      <header className="popup-header" data-tauri-drag-region>
+        <span className="popup-crumb" data-tauri-drag-region>
           {card.deck} · {card.chapter}
         </span>
         <button className="popup-close" onClick={() => void closeAll()} title="关闭并跳过剩余">

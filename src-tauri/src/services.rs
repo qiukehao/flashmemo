@@ -9,7 +9,7 @@ use crate::scheduler::{self, CardSched, CardState, Rating, ScheduleConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardDto {
     pub id: i64,
@@ -250,6 +250,16 @@ pub fn due_queue(db: &Db, limit: i64) -> Result<Vec<CardDto>, String> {
         .collect())
 }
 
+/// Read-only deck browsing (SPEC §15.2 卡包管理 的 M1 只读预览).
+pub fn list_cards(db: &Db, deck: &str) -> Result<Vec<CardDto>, String> {
+    Ok(db
+        .list_cards_by_deck(deck)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(to_dto)
+        .collect())
+}
+
 /// Rate a card: scheduler decides, then card update + review_log row commit in
 /// one transaction (SPEC §17: a crash must never lose a rating).
 pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> {
@@ -476,6 +486,21 @@ mod tests {
         assert_eq!(p.len(), 4);
         assert_eq!(p[0], Some(1.0));
         assert!(p[3].unwrap() > 1000.0);
+    }
+
+    #[test]
+    fn list_cards_orders_by_deck_reading_order() {
+        let d = db();
+        add_card(&d, "MySQL", "索引", "B+树", "x").unwrap();
+        add_card(&d, "MySQL", "事务", "ACID", "x").unwrap();
+        add_card(&d, "Redis", "持久化", "RDB", "x").unwrap();
+        let cards = list_cards(&d, "MySQL").unwrap();
+        assert_eq!(
+            cards.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
+            ["B+树", "ACID"]
+        );
+        assert!(cards.iter().all(|c| c.deck == "MySQL"));
+        assert_eq!(list_cards(&d, "不存在").unwrap(), Vec::new());
     }
 
     #[test]

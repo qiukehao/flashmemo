@@ -235,10 +235,16 @@ pub fn spawn(app: tauri::AppHandle, state: std::sync::Arc<Mutex<EngineState>>) {
 }
 
 /// Wire the immediate-review path: tray "立即复习" emits `force-review`.
+/// If a popup session is already open, surface it instead of doing nothing.
 pub fn listen_force_review(app: &tauri::AppHandle, state: std::sync::Arc<Mutex<EngineState>>) {
     let handle = app.clone();
     app.listen("force-review", move |_| {
-        tick(&handle, &state);
+        if let Some(w) = handle.get_webview_window("popup") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            tick(&handle, &state);
+        }
     });
 }
 

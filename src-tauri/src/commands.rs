@@ -45,6 +45,11 @@ pub fn list_overview(db: DbState) -> Result<Vec<DeckOverview>, String> {
 }
 
 #[tauri::command]
+pub fn list_cards(deck: String, db: DbState) -> Result<Vec<CardDto>, String> {
+    services::list_cards(&lock(&db), &deck)
+}
+
+#[tauri::command]
 pub fn due_queue(limit: i64, db: DbState) -> Result<Vec<CardDto>, String> {
     services::due_queue(&lock(&db), limit)
 }

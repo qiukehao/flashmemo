@@ -318,6 +318,17 @@ impl Db {
         let rows = stmt.query_map([source_file], Self::row_to_card)?;
         rows.collect()
     }
+
+    /// All cards of one deck in reading order (chapter order, then insertion).
+    pub fn list_cards_by_deck(&self, deck: &str) -> rusqlite::Result<Vec<Card>> {
+        let sql = format!(
+            "{} WHERE d.name = ?1 ORDER BY ch.order_idx ASC, c.id ASC",
+            Self::CARD_SELECT
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map([deck], Self::row_to_card)?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]

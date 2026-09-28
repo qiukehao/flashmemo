@@ -47,6 +47,7 @@ export const api = {
   addCard: (deck: string, chapter: string, title: string, contentMd: string) =>
     invoke<CardDto>("add_card", { deck, chapter, title, contentMd }),
   listOverview: () => invoke<DeckOverview[]>("list_overview"),
+  listCards: (deck: string) => invoke<CardDto[]>("list_cards", { deck }),
   dueQueue: (limit: number) => invoke<CardDto[]>("due_queue", { limit }),
   rateCard: (cardId: number, rating: RatingName) =>
     invoke<CardDto>("rate_card", { cardId, rating }),

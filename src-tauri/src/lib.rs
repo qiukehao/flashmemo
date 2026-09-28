@@ -111,6 +111,7 @@ pub fn run() {
             commands::preview_import,
             commands::add_card,
             commands::list_overview,
+            commands::list_cards,
             commands::due_queue,
             commands::rate_card,
             commands::skip_card,
