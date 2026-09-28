@@ -128,6 +128,11 @@ pub fn review(
     cfg: &ScheduleConfig,
 ) -> fsrs::Result<ScheduleOutcome> {
     let steps = &cfg.steps_min;
+    // Empty learning steps = intermittent mode: no minute-level re-pops at all,
+    // every rating (including Again) goes straight to an FSRS interval.
+    if steps.is_empty() {
+        return fsrs_outcome(card, rating, now, cfg, elapsed_days(card, now));
+    }
     let last = steps.len().saturating_sub(1);
     match card.state {
         CardState::Review => match rating {
@@ -201,6 +206,18 @@ pub fn preview(
     let steps = &cfg.steps_min;
     let last = steps.len().saturating_sub(1);
     let m = |min: i64| Some(min as f64);
+    // Intermittent mode: every rating is scheduled by FSRS directly.
+    if steps.is_empty() {
+        let fsrs = FSRS::new(&[])?;
+        let states =
+            fsrs.next_states(memory_state(card), cfg.retention, elapsed_days(card, now))?;
+        return Ok([
+            Some(minutes(states.again.interval) as f64),
+            Some(minutes(states.hard.interval) as f64),
+            Some(minutes(states.good.interval) as f64),
+            Some(minutes(states.easy.interval) as f64),
+        ]);
+    }
     if card.state == CardState::Review {
         let fsrs = FSRS::new(&[])?;
         let states =
@@ -334,6 +351,63 @@ mod tests {
             (2.0..=20.0).contains(&d),
             "easy graduation {d} not in 2..=20d"
         );
+    }
+
+    #[test]
+    fn empty_steps_send_new_cards_straight_to_fsrs() {
+        let now = Utc::now();
+        let intermittent = ScheduleConfig {
+            steps_min: vec![],
+            ..ScheduleConfig::default()
+        };
+        // Even Again leaves the minute-level phase: everything is FSRS-scheduled.
+        for rating in [Rating::Again, Rating::Hard, Rating::Good, Rating::Easy] {
+            let out = review(&new_card(), rating, now, &intermittent).unwrap();
+            assert_eq!(out.state, CardState::Review, "{rating:?} should graduate");
+            assert!(out.due_at > now, "{rating:?} due must be in the future");
+            assert!(out.stability.is_some());
+        }
+        let again = review(&new_card(), Rating::Again, now, &intermittent).unwrap();
+        let good = review(&new_card(), Rating::Good, now, &intermittent).unwrap();
+        assert!(again.due_at < good.due_at, "Again sooner than Good");
+    }
+
+    #[test]
+    fn empty_steps_review_again_skips_relearning() {
+        let now = Utc::now();
+        let intermittent = ScheduleConfig {
+            steps_min: vec![],
+            ..ScheduleConfig::default()
+        };
+        let card = CardSched {
+            state: CardState::Review,
+            stability: Some(5.0),
+            difficulty: Some(4.0),
+            learning_step: 0,
+            last_review_at: Some(now - Duration::days(5)),
+        };
+        let out = review(&card, Rating::Again, now, &intermittent).unwrap();
+        assert_eq!(
+            out.state,
+            CardState::Review,
+            "no relearning phase without steps"
+        );
+        assert!(out.due_at > now);
+        assert!(out.stability.unwrap() < 5.0, "lapse still drops stability");
+    }
+
+    #[test]
+    fn empty_steps_preview_never_panics() {
+        let now = Utc::now();
+        let intermittent = ScheduleConfig {
+            steps_min: vec![],
+            ..ScheduleConfig::default()
+        };
+        let p = preview(&new_card(), now, &intermittent).unwrap();
+        assert!(p.iter().all(|x| x.is_some()));
+        assert!(p[0].unwrap() < p[1].unwrap());
+        assert!(p[1].unwrap() < p[2].unwrap());
+        assert!(p[2].unwrap() < p[3].unwrap());
     }
 
     #[test]

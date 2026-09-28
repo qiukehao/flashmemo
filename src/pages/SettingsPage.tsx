@@ -2,12 +2,20 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 
 const FIELDS: { key: string; label: string; hint?: string; options?: string[] }[] = [
-  { key: "popup_interval_min", label: "弹窗间隔（分钟）" },
+  {
+    key: "popup_interval_min",
+    label: "弹窗间隔（分钟）",
+    hint: "两次弹窗之间的最小间隔；手动「立即复习」不受限",
+  },
   { key: "per_popup", label: "每次弹窗卡片数", hint: "1~5" },
   { key: "study_start", label: "学习时段开始", hint: "HH:MM" },
   { key: "study_end", label: "学习时段结束", hint: "HH:MM" },
   { key: "retention", label: "目标保留率", hint: "0.80 ~ 0.95" },
-  { key: "steps_min", label: "学习步骤（分钟）", hint: "逗号分隔，如 1,5,10" },
+  {
+    key: "steps_min",
+    label: "学习步骤（分钟）",
+    hint: "如 1,5,10；留空 = 无分钟级步骤，评分后直接按天/小时复习（间断记忆推荐）",
+  },
   { key: "skip_delay_min", label: "跳过重入队延迟（分钟）", hint: "10 ~ 120" },
   {
     key: "notify_mode",

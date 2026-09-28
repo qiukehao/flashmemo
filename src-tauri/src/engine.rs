@@ -37,6 +37,9 @@ impl Default for EngineSettings {
 #[derive(Default)]
 pub struct EngineState {
     pub last_notify: Option<DateTime<Utc>>,
+    /// When the last popup was opened — the `popup_interval_min` throttle
+    /// counts from here (manual triggers bypass it).
+    pub last_popup_at: Option<DateTime<Utc>>,
 }
 
 pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
@@ -62,15 +65,27 @@ fn not_paused(s: &EngineSettings) -> bool {
     s.paused_until.is_none_or(|t| Utc::now() >= t)
 }
 
-/// SPEC §8.2: pop only when cards are due, within hours, unpaused, and while
-/// no popup session is already open.
+/// SPEC §16 弹窗间隔: at least `interval_min` must pass between popup sessions
+/// (even when learning cards become due sooner). Manual triggers bypass this.
+pub fn interval_elapsed(last_popup_at: Option<DateTime<Utc>>, interval_min: u32) -> bool {
+    last_popup_at.is_none_or(|t| Utc::now() - t >= chrono::Duration::minutes(interval_min as i64))
+}
+
+/// SPEC §8.2: pop only when cards are due, within hours, unpaused, no popup
+/// already open, and the popup interval has elapsed since the last session.
 pub fn popup_decision(
     due_count: usize,
     now: DateTime<Local>,
     s: &EngineSettings,
     popup_open: bool,
+    last_popup_at: Option<DateTime<Utc>>,
+    force: bool,
 ) -> bool {
-    due_count > 0 && !popup_open && in_study_hours(now, s) && not_paused(s)
+    due_count > 0
+        && !popup_open
+        && in_study_hours(now, s)
+        && not_paused(s)
+        && (force || interval_elapsed(last_popup_at, s.interval_min))
 }
 
 /// Center of the monitor work area, in **logical pixels** (2026-09-28 调整：
@@ -97,8 +112,10 @@ fn read_settings(db: &Db) -> EngineSettings {
     }
 }
 
-/// One engine pass. Returns true if a popup was opened.
-pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
+/// One engine pass. Returns true if a popup was opened. `force` is set for
+/// manual triggers (tray "立即复习" / 复习选中) and bypasses the interval
+/// throttle.
+pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>, force: bool) -> bool {
     let Some(db_cell) = app.try_state::<Mutex<Db>>() else {
         return false;
     };
@@ -111,11 +128,11 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
         )
     };
     let now_local = Local::now();
-    if due == 0 || !not_paused(&settings) || !in_study_hours(now_local, &settings) {
-        return false;
-    }
     let mut st = state.lock().expect("engine state poisoned");
     if settings.notify_mode == "notify" {
+        if due == 0 || !not_paused(&settings) || !in_study_hours(now_local, &settings) {
+            return false;
+        }
         // Light notification (SPEC §8.1); throttled to one per popup interval.
         let due_notify = st.last_notify.is_none_or(|t| {
             Utc::now() - t >= chrono::Duration::minutes(settings.interval_min as i64)
@@ -126,7 +143,14 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
         }
         return false;
     }
-    if popup_open {
+    if !popup_decision(
+        due,
+        now_local,
+        &settings,
+        popup_open,
+        st.last_popup_at,
+        force,
+    ) {
         return false;
     }
     let (mx, my, mw, mh) = cursor_monitor_logical(app);
@@ -137,7 +161,10 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
         pos.0, pos.1, mx, my, mw, mh
     );
     match open_popup(app, pos) {
-        Ok(_window) => true,
+        Ok(_window) => {
+            st.last_popup_at = Some(Utc::now());
+            true
+        }
         Err(_) => false,
     }
 }
@@ -212,12 +239,13 @@ pub fn open_review_popup(app: &tauri::AppHandle) -> bool {
 pub fn spawn(app: tauri::AppHandle, state: std::sync::Arc<Mutex<EngineState>>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(TICK_SECS));
-        tick(&app, &state);
+        tick(&app, &state, false);
     });
 }
 
 /// Wire the immediate-review path: tray "立即复习" emits `force-review`.
-/// If a popup session is already open, surface it instead of doing nothing.
+/// If a popup session is already open, surface it; otherwise open one now,
+/// bypassing the interval throttle (the user asked explicitly).
 pub fn listen_force_review(app: &tauri::AppHandle, state: std::sync::Arc<Mutex<EngineState>>) {
     let handle = app.clone();
     app.listen("force-review", move |_| {
@@ -225,7 +253,7 @@ pub fn listen_force_review(app: &tauri::AppHandle, state: std::sync::Arc<Mutex<E
             let _ = w.show();
             let _ = w.set_focus();
         } else {
-            tick(&handle, &state);
+            tick(&handle, &state, true);
         }
     });
 }
@@ -256,20 +284,42 @@ mod tests {
     fn popup_decision_suppressed() {
         let s = settings();
         // Nothing due.
-        assert!(!popup_decision(0, at(10, 0), &s, false));
+        assert!(!popup_decision(0, at(10, 0), &s, false, None, false));
         // Outside study hours.
-        assert!(!popup_decision(5, at(7, 0), &s, false));
+        assert!(!popup_decision(5, at(7, 0), &s, false, None, false));
         // Paused.
         let mut paused = settings();
         paused.paused_until = Some(Utc::now() + chrono::Duration::hours(1));
-        assert!(!popup_decision(5, at(10, 0), &paused, false));
+        assert!(!popup_decision(5, at(10, 0), &paused, false, None, false));
         // Popup already open.
-        assert!(!popup_decision(5, at(10, 0), &s, true));
+        assert!(!popup_decision(5, at(10, 0), &s, true, None, false));
         // All clear.
-        assert!(popup_decision(5, at(10, 0), &s, false));
+        assert!(popup_decision(5, at(10, 0), &s, false, None, false));
         // Pause expired.
         paused.paused_until = Some(Utc::now() - chrono::Duration::hours(1));
-        assert!(popup_decision(5, at(10, 0), &paused, false));
+        assert!(popup_decision(5, at(10, 0), &paused, false, None, false));
+    }
+
+    #[test]
+    fn popup_throttled_by_interval_setting() {
+        // Default interval is 10 minutes.
+        let s = settings();
+        let recent = Some(Utc::now() - chrono::Duration::minutes(2));
+        assert!(
+            !popup_decision(5, at(10, 0), &s, false, recent, false),
+            "a 1-minute-due learning card must wait for the 10-minute popup interval"
+        );
+        let old = Some(Utc::now() - chrono::Duration::minutes(11));
+        assert!(popup_decision(5, at(10, 0), &s, false, old, false));
+        // Manual triggers bypass the throttle.
+        assert!(popup_decision(5, at(10, 0), &s, false, recent, true));
+        // User-configured 5-minute interval.
+        let mut custom = settings();
+        custom.interval_min = 5;
+        let four = Some(Utc::now() - chrono::Duration::minutes(4));
+        assert!(!popup_decision(5, at(10, 0), &custom, false, four, false));
+        let six = Some(Utc::now() - chrono::Duration::minutes(6));
+        assert!(popup_decision(5, at(10, 0), &custom, false, six, false));
     }
 
     #[test]

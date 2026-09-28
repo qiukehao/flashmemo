@@ -114,10 +114,9 @@ fn to_sched(c: &Card) -> CardSched {
 fn cfg_from_db(db: &Db) -> ScheduleConfig {
     let mut cfg = ScheduleConfig::default();
     if let Some(v) = db.get_setting("steps_min").ok().flatten() {
-        let steps: Vec<u32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !steps.is_empty() {
-            cfg.steps_min = steps;
-        }
+        // Present-but-empty means intermittent mode: no minute-level steps at
+        // all (SPEC §7.2 修订). A missing key keeps the 1/5/10 default.
+        cfg.steps_min = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
     }
     if let Some(v) = db.get_setting("retention").ok().flatten() {
         if let Ok(r) = v.parse::<f32>() {
@@ -755,6 +754,22 @@ mod tests {
         assert_eq!(
             r.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
             ["T1"]
+        );
+    }
+
+    #[test]
+    fn empty_steps_setting_enables_intermittent_mode() {
+        let d = db();
+        let c = add_card(&d, "D", "C", "T", "x").unwrap();
+        // Default 1/5/10: Again previews as one minute.
+        assert_eq!(preview_intervals(&d, c.id).unwrap()[0], Some(1.0));
+        // Empty steps setting: no minute-level re-pops at all.
+        set_settings(&d, &[("steps_min".into(), "".into())]).unwrap();
+        let p = preview_intervals(&d, c.id).unwrap();
+        assert!(
+            p[0].unwrap() > 60.0,
+            "intermittent mode should schedule Again hours out, got {:?}",
+            p[0]
         );
     }
 
