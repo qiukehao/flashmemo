@@ -1,60 +1,68 @@
-//! Review scheduling: fixed-multiplier rules with a Familiar cap.
+//! Review scheduling by "cards shown" instead of wall-clock time.
 //!
-//! Redesigned 2026-09-28 (replaces FSRS; design reviewed externally, see
-//! docs/plans/2026-09-28-scheduling-redesign-prompt.md):
-//! - Three self-ratings for spoken recall: Unknown / Familiar / Speakable.
-//! - Unknown → short interval (or daily once the attention threshold is hit).
-//! - Familiar → grows ×1.5 but is capped at the Familiar ceiling.
-//! - Speakable → grows ×2.5 up to the global maximum.
+//! Redesigned 2026-09-28 (2nd revision, replaces the fixed-multiplier rules;
+//! external design review in docs/plans/2026-09-28-scheduling-redesign-prompt.md):
+//! - A global display counter `review_seq` (total cards ever shown) drives
+//!   eligibility: a card may reappear only after `next_eligible_seq` other
+//!   cards have been shown — "隔 N 张卡后再见", not "N 小时后".
+//! - A proficiency `level` (0..5) sets the base distance (3/5/10/20/50/100).
+//! - Ratings move the level: Unknown −1 (min 1), Familiar ±0, Speakable +1 (max 5).
+//! - Time survives only as an optional floor per rating (10min / 30min / 2h).
 //!
-//! All intervals are minutes; day-scale intervals are whole days.
+//! Display itself (and thus `review_seq`) advances in `services::mark_shown`.
 
 use chrono::{DateTime, Duration, Utc};
 
-const DAY_MIN: u32 = 1440;
+/// Levels 0..=5; index = level.
+pub const LEVEL_GAPS: [u64; 6] = [3, 5, 10, 20, 50, 100];
+pub const MAX_LEVEL: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rating {
-    /// 不了解 — could not recall the main points before revealing the answer.
+    /// 不了解
     Unknown,
-    /// 熟悉 — recalled the points but could not organize a full answer.
+    /// 熟悉
     Familiar,
-    /// 可以讲出来 — could deliver the answer unaided.
+    /// 可以讲出来
     Speakable,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScheduleConfig {
-    pub min_interval_min: u32,
-    pub initial_interval_min: u32,
-    pub familiar_mult: f64,
-    pub speak_mult: f64,
-    pub familiar_cap_min: u32,
-    pub max_interval_min: u32,
+    pub gap_unknown: u64,
+    pub gap_familiar: u64,
+    pub gap_speakable: u64,
+    pub attention_gap: u64,
+    pub max_unknown_gap: u64,
+    pub level_gap: [u64; 6],
+    pub floor_unknown_min: u32,
+    pub floor_familiar_min: u32,
+    pub floor_speakable_min: u32,
     pub attention_threshold: u32,
-    pub attention_interval_min: u32,
 }
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
         ScheduleConfig {
-            min_interval_min: 120,      // 2h
-            initial_interval_min: 1440, // 1d
-            familiar_mult: 1.5,
-            speak_mult: 2.5,
-            familiar_cap_min: 10080, // 7d
-            max_interval_min: 86400, // 60d
+            gap_unknown: 3,
+            gap_familiar: 8,
+            gap_speakable: 20,
+            attention_gap: 5,
+            max_unknown_gap: 10,
+            level_gap: LEVEL_GAPS,
+            floor_unknown_min: 10,
+            floor_familiar_min: 30,
+            floor_speakable_min: 120,
             attention_threshold: 3,
-            attention_interval_min: 1440, // 1d
         }
     }
 }
 
-/// Scheduler-facing projection of a card. `interval_min: None` means the card
-/// has never been scheduled (new card).
+/// Scheduler-facing projection of a card.
 #[derive(Debug, Clone)]
 pub struct CardSched {
-    pub interval_min: Option<u32>,
+    pub level: u32,
+    pub next_eligible_seq: u64,
     pub unknown_streak: u32,
     pub speak_streak: u32,
     pub needs_attention: bool,
@@ -62,103 +70,116 @@ pub struct CardSched {
 
 #[derive(Debug, Clone)]
 pub struct ScheduleOutcome {
-    pub interval_min: u32,
-    pub due_at: DateTime<Utc>,
+    pub level: u32,
+    pub next_eligible_seq: u64,
     pub unknown_streak: u32,
     pub speak_streak: u32,
     pub needs_attention: bool,
+    /// Optional time floor: the card may not appear before this moment.
+    pub earliest_at: DateTime<Utc>,
 }
 
-/// Round up: below a day to whole hours, a day or more to whole days.
-fn round_up(minutes: f64) -> u32 {
-    if minutes < DAY_MIN as f64 {
-        ((minutes / 60.0).ceil() as u32) * 60
-    } else {
-        ((minutes / DAY_MIN as f64).ceil() as u32) * DAY_MIN
+fn level_gap(cfg: &ScheduleConfig, level: u32) -> u64 {
+    cfg.level_gap[(level as usize).min(cfg.level_gap.len() - 1)]
+}
+
+fn floor_min(rating: Rating, cfg: &ScheduleConfig) -> u32 {
+    match rating {
+        Rating::Unknown => cfg.floor_unknown_min,
+        Rating::Familiar => cfg.floor_familiar_min,
+        Rating::Speakable => cfg.floor_speakable_min,
     }
 }
 
-/// Interval + counter updates for one rating, without a due date (so `preview`
-/// and `review` share the exact same rules).
-fn next_interval(card: &CardSched, rating: Rating, cfg: &ScheduleConfig) -> (u32, u32, u32, bool) {
+/// Gap in cards + counter/level updates for one rating (no `now`), so `preview`
+/// and `review` share the exact same rules.
+fn next_state(
+    card: &CardSched,
+    rating: Rating,
+    cfg: &ScheduleConfig,
+) -> (u32, u64, u32, u32, bool) {
     let mut unknown_streak = card.unknown_streak;
     let mut speak_streak = card.speak_streak;
     let mut needs_attention = card.needs_attention;
+    let level;
+    let gap;
 
-    let raw: f64 = match rating {
+    match rating {
         Rating::Unknown => {
             unknown_streak += 1;
             speak_streak = 0;
-            if unknown_streak >= cfg.attention_threshold {
-                // Not a memory problem to be fixed by popups: slow down to
-                // daily and surface the card as "needs deliberate re-learning".
+            level = card.level.saturating_sub(1).max(1);
+            if unknown_streak >= 4 {
+                // Repeating the same card faster does not build memory: back off
+                // further instead of hammering.
+                gap = cfg.max_unknown_gap;
+            } else if unknown_streak >= cfg.attention_threshold {
+                gap = cfg.attention_gap;
                 needs_attention = true;
-                cfg.attention_interval_min as f64
             } else {
-                cfg.min_interval_min as f64
+                gap = cfg.gap_unknown;
             }
         }
         Rating::Familiar => {
             unknown_streak = 0;
             speak_streak = 0;
-            // Familiar does NOT clear the attention flag (design §1 note).
-            match card.interval_min {
-                None => cfg.initial_interval_min as f64,
-                Some(i) => (i as f64 * cfg.familiar_mult)
-                    .min(cfg.familiar_cap_min as f64)
-                    .max(cfg.initial_interval_min as f64),
-            }
+            // Familiar does NOT clear the attention flag (design §3 note stays).
+            level = card.level.max(1);
+            gap = level_gap(cfg, level).max(cfg.gap_familiar);
         }
         Rating::Speakable => {
             unknown_streak = 0;
             speak_streak += 1;
             needs_attention = false;
-            match card.interval_min {
-                None => cfg.initial_interval_min as f64,
-                Some(i) => (i as f64 * cfg.speak_mult).max(cfg.initial_interval_min as f64),
-            }
+            level = (card.level + 1).min(MAX_LEVEL);
+            gap = level_gap(cfg, level).max(cfg.gap_speakable);
         }
-    };
-
-    let mut interval = round_up(raw).clamp(cfg.min_interval_min, cfg.max_interval_min);
-    if rating == Rating::Familiar {
-        // The Familiar ceiling overrides the generic max.
-        interval = interval.min(cfg.familiar_cap_min);
     }
-    interval = interval.max(cfg.min_interval_min);
-    (interval, unknown_streak, speak_streak, needs_attention)
+    (level, gap, unknown_streak, speak_streak, needs_attention)
 }
 
+/// Apply a rating: new level, next eligible display counter, time floor.
 pub fn review(
     card: &CardSched,
     rating: Rating,
+    current_seq: u64,
     now: DateTime<Utc>,
     cfg: &ScheduleConfig,
 ) -> ScheduleOutcome {
-    let (interval_min, unknown_streak, speak_streak, needs_attention) =
-        next_interval(card, rating, cfg);
+    let (level, gap, unknown_streak, speak_streak, needs_attention) = next_state(card, rating, cfg);
     ScheduleOutcome {
-        interval_min,
-        due_at: now + Duration::minutes(interval_min as i64),
+        level,
+        next_eligible_seq: current_seq + gap,
         unknown_streak,
         speak_streak,
         needs_attention,
+        earliest_at: now + Duration::minutes(i64::from(floor_min(rating, cfg))),
     }
 }
 
-/// Planned interval in minutes per [Unknown, Familiar, Speakable].
-pub fn preview(card: &CardSched, cfg: &ScheduleConfig) -> [u32; 3] {
+/// Card-gap preview per [Unknown, Familiar, Speakable] — "隔 N 张".
+pub fn preview(card: &CardSched, cfg: &ScheduleConfig) -> [u64; 3] {
     [
-        next_interval(card, Rating::Unknown, cfg).0,
-        next_interval(card, Rating::Familiar, cfg).0,
-        next_interval(card, Rating::Speakable, cfg).0,
+        next_state(card, Rating::Unknown, cfg).1,
+        next_state(card, Rating::Familiar, cfg).1,
+        next_state(card, Rating::Speakable, cfg).1,
     ]
 }
 
+/// Eligibility: enough other cards shown AND the time floor passed.
+pub fn is_eligible(
+    card: &CardSched,
+    current_seq: u64,
+    earliest_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    current_seq >= card.next_eligible_seq && now >= earliest_at
+}
+
 /// SPEC §7.1: skipping rates nothing — the card re-enters the queue later with
-/// every field untouched.
+/// every field untouched (only its `due_at` floor is pushed forward).
 pub fn skip(now: DateTime<Utc>, skip_delay_min: u32) -> DateTime<Utc> {
-    now + Duration::minutes(skip_delay_min as i64)
+    now + Duration::minutes(i64::from(skip_delay_min))
 }
 
 #[cfg(test)]
@@ -171,189 +192,169 @@ mod tests {
 
     fn new_card() -> CardSched {
         CardSched {
-            interval_min: None,
+            level: 0,
+            next_eligible_seq: 0,
             unknown_streak: 0,
             speak_streak: 0,
             needs_attention: false,
         }
     }
 
-    fn card_at(interval_min: u32) -> CardSched {
+    fn card_at(level: u32) -> CardSched {
         CardSched {
-            interval_min: Some(interval_min),
+            level,
             ..new_card()
         }
     }
 
     #[test]
-    fn new_card_rules_match_design_table() {
-        let now = Utc::now();
-        let c = cfg();
-        let unknown = review(&new_card(), Rating::Unknown, now, &c);
-        assert_eq!(unknown.interval_min, 120, "new + Unknown = 2h");
-        assert_eq!(unknown.unknown_streak, 1);
-        let familiar = review(&new_card(), Rating::Familiar, now, &c);
-        assert_eq!(familiar.interval_min, 1440, "new + Familiar = 1d");
-        let speakable = review(&new_card(), Rating::Speakable, now, &c);
-        assert_eq!(
-            speakable.interval_min, 1440,
-            "new + Speakable = 1d (cross-day confirm)"
-        );
-        assert_eq!(speakable.speak_streak, 1);
-    }
-
-    #[test]
-    fn unknown_streak_marks_attention_at_threshold() {
+    fn unknown_gap_is_three_cards_then_escalates() {
         let now = Utc::now();
         let c = cfg();
         let mut card = new_card();
-        // 1st and 2nd Unknown: still the short interval.
-        for streak in 1..=2u32 {
-            let out = review(&card, Rating::Unknown, now, &c);
-            assert_eq!(out.interval_min, 120, "streak {streak}");
+        // 1st and 2nd Unknown: 3 cards later.
+        for expected_streak in 1..=2u32 {
+            let out = review(&card, Rating::Unknown, 100, now, &c);
+            assert_eq!(out.next_eligible_seq, 103, "streak {expected_streak}");
+            assert_eq!(out.unknown_streak, expected_streak);
             assert!(!out.needs_attention);
+            assert_eq!(out.level, 1, "level drops but never below 1");
             card = CardSched {
-                interval_min: Some(out.interval_min),
+                level: out.level,
+                next_eligible_seq: out.next_eligible_seq,
                 unknown_streak: out.unknown_streak,
                 speak_streak: out.speak_streak,
                 needs_attention: out.needs_attention,
             };
         }
-        // 3rd: switch to daily + attention flag, and stay there.
-        let out = review(&card, Rating::Unknown, now, &c);
-        assert_eq!(out.unknown_streak, 3);
-        assert_eq!(out.interval_min, 1440, "3rd Unknown slows to 1d");
+        // 3rd: 5 cards later + attention flag.
+        let out = review(&card, Rating::Unknown, 100, now, &c);
+        assert_eq!(out.next_eligible_seq, 105);
         assert!(out.needs_attention);
-        let again = review(
+        // 4th and beyond: 10 cards later, no further escalation.
+        card = CardSched {
+            level: out.level,
+            next_eligible_seq: out.next_eligible_seq,
+            unknown_streak: out.unknown_streak,
+            speak_streak: out.speak_streak,
+            needs_attention: out.needs_attention,
+        };
+        let out = review(&card, Rating::Unknown, 100, now, &c);
+        assert_eq!(out.next_eligible_seq, 110);
+        let out2 = review(
             &CardSched {
-                interval_min: Some(out.interval_min),
-                unknown_streak: out.unknown_streak,
-                speak_streak: out.speak_streak,
-                needs_attention: out.needs_attention,
+                unknown_streak: 4,
+                ..card
             },
             Rating::Unknown,
+            100,
             now,
             &c,
         );
-        assert_eq!(again.interval_min, 1440, "stays daily afterwards");
+        assert_eq!(out2.next_eligible_seq, 110);
     }
 
     #[test]
-    fn familiar_growth_is_capped() {
+    fn unknown_time_floor_is_ten_minutes() {
         let now = Utc::now();
-        let c = cfg();
-        // 1d → (1.5d→2d) → 3d → 5d → 7d (cap)
-        let expected = [2 * DAY_MIN, 3 * DAY_MIN, 5 * DAY_MIN, 7 * DAY_MIN];
-        let mut interval = DAY_MIN;
-        for want in expected {
-            let out = review(&card_at(interval), Rating::Familiar, now, &c);
-            assert_eq!(out.interval_min, want, "from {interval} min");
-            interval = out.interval_min;
-        }
-        // A long-interval card rated Familiar falls back to the cap.
-        let out = review(&card_at(30 * DAY_MIN), Rating::Familiar, now, &c);
-        assert_eq!(out.interval_min, 7 * DAY_MIN);
-        // Familiar never clears the attention flag.
-        let flagged = CardSched {
-            needs_attention: true,
-            ..card_at(DAY_MIN)
-        };
-        assert!(review(&flagged, Rating::Familiar, now, &c).needs_attention);
+        let out = review(&new_card(), Rating::Unknown, 0, now, &cfg());
+        assert_eq!((out.earliest_at - now).num_minutes(), 10);
     }
 
     #[test]
-    fn speakable_growth_reaches_max_and_clamps() {
+    fn familiar_gap_uses_level_with_minimum_eight() {
         let now = Utc::now();
         let c = cfg();
-        // 1d → 3d → 8d → 20d → 50d → 60d (clamp)
-        let expected = [
-            3 * DAY_MIN,
-            8 * DAY_MIN,
-            20 * DAY_MIN,
-            50 * DAY_MIN,
-            60 * DAY_MIN,
-        ];
-        let mut interval = DAY_MIN;
-        for want in expected {
-            let out = review(&card_at(interval), Rating::Speakable, now, &c);
-            assert_eq!(out.interval_min, want, "from {interval} min");
-            interval = out.interval_min;
-        }
-        // Already at max: stays at max.
-        let out = review(&card_at(60 * DAY_MIN), Rating::Speakable, now, &c);
-        assert_eq!(out.interval_min, 60 * DAY_MIN);
+        // level 0 → treated as 1 → base 5, floored by gap_familiar 8.
+        let out = review(&new_card(), Rating::Familiar, 50, now, &c);
+        assert_eq!(out.level, 1);
+        assert_eq!(out.next_eligible_seq, 58, "max(level_gap[1]=5, 8)");
+        // level 3 → base 20 wins over the 8 minimum.
+        let out = review(&card_at(3), Rating::Familiar, 50, now, &c);
+        assert_eq!(out.level, 3);
+        assert_eq!(out.next_eligible_seq, 70);
+        assert_eq!((out.earliest_at - now).num_minutes(), 30);
     }
 
     #[test]
-    fn speakable_clears_attention_and_resets_unknown_streak() {
+    fn speakable_levels_up_and_gap_uses_new_level() {
         let now = Utc::now();
         let c = cfg();
-        let flagged = CardSched {
-            interval_min: Some(DAY_MIN),
-            unknown_streak: 3,
-            speak_streak: 0,
-            needs_attention: true,
-        };
-        let out = review(&flagged, Rating::Speakable, now, &c);
-        assert!(!out.needs_attention);
-        assert_eq!(out.unknown_streak, 0);
+        // level 0 → 1: max(level_gap[1]=5, 20) = 20.
+        let out = review(&new_card(), Rating::Speakable, 0, now, &c);
+        assert_eq!(out.level, 1);
+        assert_eq!(out.next_eligible_seq, 20);
         assert_eq!(out.speak_streak, 1);
+        // level 3 → 4: max(level_gap[4]=50, 20) = 50.
+        let out = review(&card_at(3), Rating::Speakable, 100, now, &c);
+        assert_eq!(out.level, 4);
+        assert_eq!(out.next_eligible_seq, 150);
+        // level 5 stays at 5: max(level_gap[5]=100, 20) = 100.
+        let out = review(&card_at(5), Rating::Speakable, 0, now, &c);
+        assert_eq!(out.level, 5);
+        assert_eq!(out.next_eligible_seq, 100);
+        assert_eq!((out.earliest_at - now).num_minutes(), 120);
     }
 
     #[test]
-    fn familiar_resets_streaks_both_ways() {
+    fn speakable_clears_attention_familiar_does_not() {
+        let now = Utc::now();
+        let c = cfg();
+        let flagged = CardSched {
+            level: 2,
+            needs_attention: true,
+            unknown_streak: 3,
+            ..new_card()
+        };
+        assert!(!review(&flagged, Rating::Speakable, 0, now, &c).needs_attention);
+        assert!(review(&flagged, Rating::Familiar, 0, now, &c).needs_attention);
+    }
+
+    #[test]
+    fn streaks_reset_appropriately() {
         let now = Utc::now();
         let c = cfg();
         let card = CardSched {
-            interval_min: Some(DAY_MIN),
+            level: 2,
             unknown_streak: 2,
             speak_streak: 3,
-            needs_attention: false,
+            ..new_card()
         };
-        let out = review(&card, Rating::Familiar, now, &c);
+        let out = review(&card, Rating::Familiar, 0, now, &c);
         assert_eq!((out.unknown_streak, out.speak_streak), (0, 0));
+        let out = review(&card, Rating::Speakable, 0, now, &c);
+        assert_eq!((out.unknown_streak, out.speak_streak), (0, 4));
     }
 
     #[test]
-    fn intervals_respect_configured_bounds() {
-        let now = Utc::now();
-        let mut c = cfg();
-        c.min_interval_min = 30;
-        // Familiar has a floor at the 1-day confirm interval (design formula).
-        let out = review(&card_at(60), Rating::Familiar, now, &c);
-        assert_eq!(
-            out.interval_min, 1440,
-            "Familiar never dips below the 1-day confirm interval"
-        );
-        // Custom tiny max clamps.
-        c.max_interval_min = 200;
-        let out = review(&card_at(DAY_MIN), Rating::Speakable, now, &c);
-        assert_eq!(out.interval_min, 200);
-    }
-
-    #[test]
-    fn preview_lists_three_intervals_and_never_panics() {
+    fn preview_lists_three_card_gaps() {
         let c = cfg();
         let p = preview(&new_card(), &c);
         assert_eq!(
             p,
-            [120, 1440, 1440],
-            "new card: unknown 2h, both positives 1d"
+            [3, 8, 20],
+            "new card: unknown 3, familiar 8, speakable 20"
         );
-        let p = preview(&card_at(DAY_MIN), &c);
-        assert_eq!(p, [120, 2 * DAY_MIN, 3 * DAY_MIN]);
-        // A card already on a 2-long Unknown streak previews the daily drop.
-        let flagged = CardSched {
-            interval_min: Some(DAY_MIN),
-            unknown_streak: 2,
-            speak_streak: 0,
-            needs_attention: false,
-        };
-        assert_eq!(preview(&flagged, &c)[0], 1440);
+        let p = preview(&card_at(4), &c);
+        assert_eq!(p, [3, 50, 100], "level 4: familiar base 50, speakable 100");
     }
 
     #[test]
-    fn skip_postpones_without_touching_the_card() {
+    fn eligibility_requires_seq_and_time() {
+        let now = Utc::now();
+        let card = CardSched {
+            next_eligible_seq: 104,
+            ..new_card()
+        };
+        // Sequence reached but time floor still in the future.
+        assert!(!is_eligible(&card, 104, now + Duration::minutes(5), now));
+        // Time passed but sequence not reached.
+        assert!(!is_eligible(&card, 103, now - Duration::minutes(5), now));
+        assert!(is_eligible(&card, 104, now - Duration::minutes(5), now));
+    }
+
+    #[test]
+    fn skip_postpones_the_time_floor_only() {
         let now = Utc::now();
         let due = skip(now, 30);
         assert_eq!((due - now).num_minutes(), 30);

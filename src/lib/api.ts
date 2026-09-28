@@ -9,6 +9,7 @@ export interface CardDto {
   state: string;
   dueAt: string;
   needsAttention: boolean;
+  level: number;
 }
 
 export interface ImportFile {
@@ -65,8 +66,7 @@ export const api = {
     invoke<CardDto>("rate_card", { cardId, rating }),
   skipCard: (cardId: number) => invoke<CardDto>("skip_card", { cardId }),
   previewIntervals: (cardId: number) =>
-    invoke<number[]>("preview_intervals", { cardId }),
-  markShown: (cardId: number) => invoke<void>("mark_card_shown", { cardId }),
+    invoke<number[]>("preview_intervals", { cardId }),  markShown: (cardId: number) => invoke<void>("mark_card_shown", { cardId }),
   dueCount: () => invoke<number>("due_count"),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>

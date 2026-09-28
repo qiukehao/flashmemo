@@ -146,7 +146,7 @@ pub fn skip_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
 }
 
 #[tauri::command]
-pub fn preview_intervals(card_id: i64, db: DbState) -> Result<Vec<u32>, String> {
+pub fn preview_intervals(card_id: i64, db: DbState) -> Result<Vec<u64>, String> {
     services::preview_intervals(&lock(&db), card_id)
 }
 

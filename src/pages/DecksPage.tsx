@@ -2,31 +2,33 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type CardDto, type DeckOverview } from "../lib/api";
 
 const STATE_LABEL: Record<string, string> = {
-  new: "新卡",
-  learning: "学习中",
-  review: "复习中",
-  relearning: "重学",
   suspended: "已删除",
   archived: "已归档",
 };
 
+/** 熟练等级 0–5（SPEC §7.3）. */
+const LEVEL_LABEL = ["新卡", "刚接触", "能回忆", "基本熟练", "长期维护", "长期维护"];
+
+export function levelLabel(level: number, state: string): string {
+  return STATE_LABEL[state] ?? LEVEL_LABEL[Math.min(Math.max(level, 0), 5)];
+}
+
 const FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "全部" },
-  { key: "due", label: "已到期" },
+  { key: "due", label: "可复习" },
   { key: "new", label: "新卡" },
-  { key: "learning", label: "学习中" },
-  { key: "review", label: "复习中" },
+  { key: "review", label: "已复习" },
 ];
 
 function fmtDue(iso: string): string {
   const d = new Date(iso);
   const past = d.getTime() <= Date.now();
+  if (past) return "随时可复习";
   const hhmm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
   const today = new Date().toDateString() === d.toDateString();
   const label =
-    (today ? "" : d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }) + " ") +
-    hhmm;
-  return past ? `已到期 ${label}` : label;
+    today ? hhmm : d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }) + " " + hhmm;
+  return `最早 ${label}`;
 }
 
 /** Deck management + search/filter + manual review selection (SPEC §15.2). */
@@ -240,7 +242,7 @@ export default function DecksPage() {
         </span>
         <span className="muted small">
           {c.needsAttention && <span className="attention-tag">⚠ 需专项理解 </span>}
-          {STATE_LABEL[c.state] ?? c.state} · {fmtDue(c.dueAt)}
+          {levelLabel(c.level, c.state)} · {fmtDue(c.dueAt)}
         </span>
         <span className="deck-actions">
           <button className="btn small" onClick={() => startEdit(c)}>

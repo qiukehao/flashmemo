@@ -44,6 +44,11 @@ pub struct Card {
     pub unknown_streak: i64,
     pub speak_streak: i64,
     pub needs_attention: bool,
+    /// Sequence-based scheduler state (migration v3): proficiency level and
+    /// "reappear after N shown cards" counters.
+    pub level: i64,
+    pub next_eligible_seq: i64,
+    pub last_seen_seq: i64,
 }
 
 pub fn fmt_time(t: DateTime<Utc>) -> String {
@@ -149,6 +154,23 @@ UPDATE card
 UPDATE card SET state = 'review' WHERE state IN ('learning', 'relearning');
 "#;
 
+/// v3 (2026-09-28, 2nd scheduler revision): "reappear after N shown cards".
+/// `review_seq` is derived from `COUNT(card_show_log)`, so only per-card
+/// counters are added here. Existing cards become immediately eligible —
+/// time is no longer the primary scheduling axis.
+const SCHEMA_V3: &str = r#"
+ALTER TABLE card ADD COLUMN level INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card ADD COLUMN next_eligible_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card ADD COLUMN last_seen_seq INTEGER NOT NULL DEFAULT 0;
+
+-- Cards already in the rotation start at level 1 (刚接触).
+UPDATE card SET level = 1 WHERE reps > 0;
+
+-- Drop the FSRS-era time floors: eligibility is now counter-based.
+UPDATE card SET due_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE state NOT IN ('suspended', 'archived');
+"#;
+
 impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Db> {
         if let Some(parent) = path.parent() {
@@ -178,6 +200,11 @@ impl Db {
         if version < 2 {
             conn.execute_batch(SCHEMA_V2)?;
             conn.pragma_update(None, "user_version", 2)?;
+        }
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            conn.execute_batch(SCHEMA_V3)?;
+            conn.pragma_update(None, "user_version", 3)?;
         }
         Ok(())
     }
@@ -293,6 +320,9 @@ impl Db {
             unknown_streak: row.get("unknown_streak")?,
             speak_streak: row.get("speak_streak")?,
             needs_attention: row.get::<_, i64>("needs_attention")? != 0,
+            level: row.get("level")?,
+            next_eligible_seq: row.get("next_eligible_seq")?,
+            last_seen_seq: row.get("last_seen_seq")?,
         })
     }
 
@@ -300,7 +330,8 @@ impl Db {
         "SELECT c.id, d.name AS deck, ch.name AS chapter, c.title, c.content_md,
         c.state, c.stability, c.difficulty, c.due_at, c.last_review_at, c.reps, c.lapses,
         c.leech, c.locally_edited, c.learning_step, c.source_file,
-        c.interval_minutes, c.unknown_streak, c.speak_streak, c.needs_attention
+        c.interval_minutes, c.unknown_streak, c.speak_streak, c.needs_attention,
+        c.level, c.next_eligible_seq, c.last_seen_seq
         FROM card c JOIN deck d ON d.id = c.deck_id JOIN chapter ch ON ch.id = c.chapter_id";
 
     pub fn get_card(&self, id: i64) -> rusqlite::Result<Option<Card>> {
@@ -313,75 +344,101 @@ impl Db {
         }
     }
 
-    /// Display-throttling filter shared by the popup queue queries: not shown
-    /// within `gap_cutoff` and fewer than `max_shows` shows in the window since
-    /// `day_cutoff` (SPEC §7 展示限流). `gap_param`/`day_param`/`max_param` are
-    /// the positional parameter indexes of the three bindings.
-    fn eligible_shows(gap_param: usize, day_param: usize, max_param: usize) -> String {
+    /// Shared eligibility predicate for the popup pools: the card's sequence
+    /// gate is reached and its time floor has passed (SPEC §7).
+    fn eligible_seq_and_time(seq_param: usize, now_param: usize) -> String {
         format!(
-            "NOT EXISTS (SELECT 1 FROM card_show_log s
-                          WHERE s.card_id = c.id AND s.shown_at > ?{gap_param})
-             AND (SELECT COUNT(*) FROM card_show_log s2
-                   WHERE s2.card_id = c.id AND s2.shown_at > ?{day_param}) < ?{max_param}"
+            "c.state NOT IN ('suspended', 'archived')
+             AND c.next_eligible_seq <= ?{seq_param} AND c.due_at <= ?{now_param}"
         )
     }
 
-    /// Due, already-scheduled cards for a popup session: oldest due first,
-    /// display-capped, newest-introduced excluded (those go through
-    /// `new_cards_eligible`).
-    pub fn due_review_cards(
+    /// Cards whose eligibility gate is open right now (engine tick / home page).
+    pub fn eligible_count(&self, seq: i64, now: DateTime<Utc>) -> rusqlite::Result<i64> {
+        self.0.query_row(
+            "SELECT COUNT(*) FROM card c
+              WHERE c.state NOT IN ('suspended', 'archived')
+                AND c.next_eligible_seq <= ?1 AND c.due_at <= ?2",
+            rusqlite::params![seq, fmt_time(now)],
+            |r| r.get(0),
+        )
+    }
+
+    /// Total cards ever shown — the global `review_seq` (design §1).
+    pub fn show_count(&self) -> rusqlite::Result<i64> {
+        self.0
+            .query_row("SELECT COUNT(*) FROM card_show_log", [], |r| r.get(0))
+    }
+
+    /// Pool query: eligible cards of one bucket, oldest-seen first.
+    fn pool(
         &self,
+        extra_where: &str,
+        seq: i64,
         now: DateTime<Utc>,
         limit: i64,
-        gap_cutoff: DateTime<Utc>,
-        day_cutoff: DateTime<Utc>,
-        max_shows: i64,
     ) -> rusqlite::Result<Vec<Card>> {
         let sql = format!(
-            "{} WHERE c.state NOT IN ('new', 'suspended', 'archived')
-             AND c.due_at <= ?1 AND {}
-             ORDER BY c.due_at ASC LIMIT ?5",
+            "{} WHERE {} AND ({extra_where})
+             ORDER BY c.last_seen_seq ASC, c.id ASC LIMIT ?3",
             Self::CARD_SELECT,
-            Self::eligible_shows(2, 3, 4)
+            Self::eligible_seq_and_time(1, 2)
         );
         let mut stmt = self.0.prepare(&sql)?;
         let rows = stmt.query_map(
-            rusqlite::params![
-                fmt_time(now),
-                fmt_time(gap_cutoff),
-                fmt_time(day_cutoff),
-                max_shows,
-                limit
-            ],
+            rusqlite::params![seq, fmt_time(now), limit],
             Self::row_to_card,
         )?;
         rows.collect()
     }
 
-    /// Brand-new cards for a popup session, oldest id first, display-capped.
-    pub fn new_cards_eligible(
+    /// 重点回访卡 (needs_attention) — capped to one per popup by the caller.
+    pub fn attention_candidates(
         &self,
+        seq: i64,
+        now: DateTime<Utc>,
         limit: i64,
-        gap_cutoff: DateTime<Utc>,
-        day_cutoff: DateTime<Utc>,
-        max_shows: i64,
     ) -> rusqlite::Result<Vec<Card>> {
-        let sql = format!(
-            "{} WHERE c.state = 'new' AND {}
-             ORDER BY c.id ASC LIMIT ?4",
-            Self::CARD_SELECT,
-            Self::eligible_shows(1, 2, 3)
-        );
-        let mut stmt = self.0.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params![fmt_time(gap_cutoff), fmt_time(day_cutoff), max_shows, limit],
-            Self::row_to_card,
-        )?;
-        rows.collect()
+        self.pool("c.needs_attention = 1", seq, now, limit)
+    }
+
+    /// 普通到期卡: levels 1–2, excluding flagged cards.
+    pub fn due_candidates(
+        &self,
+        seq: i64,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Card>> {
+        self.pool(
+            "c.needs_attention = 0 AND c.level BETWEEN 1 AND 2",
+            seq,
+            now,
+            limit,
+        )
+    }
+
+    /// 新卡 (never reviewed).
+    pub fn new_candidates(
+        &self,
+        seq: i64,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Card>> {
+        self.pool("c.reps = 0 AND c.level = 0", seq, now, limit)
+    }
+
+    /// 长期维护卡 (level ≥ 3), excluding flagged cards.
+    pub fn normal_candidates(
+        &self,
+        seq: i64,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Card>> {
+        self.pool("c.needs_attention = 0 AND c.level >= 3", seq, now, limit)
     }
 
     /// How many cards were introduced (first-ever rating) since `cutoff` — the
-    /// daily new-card quota (SPEC §7 队列规则).
+    /// daily new-card quota.
     pub fn new_introduced_since(&self, cutoff: DateTime<Utc>) -> rusqlite::Result<i64> {
         self.0.query_row(
             "SELECT COUNT(*) FROM review_log WHERE state_before = 'new' AND reviewed_at > ?1",
@@ -394,6 +451,15 @@ impl Db {
         self.0.execute(
             "INSERT INTO card_show_log(card_id, shown_at) VALUES(?1, ?2)",
             rusqlite::params![card_id, fmt_time(at)],
+        )?;
+        Ok(())
+    }
+
+    /// Keep the card's last-seen counter in sync with the global display seq.
+    pub fn mark_seen_seq(&self, card_id: i64, seq: i64) -> rusqlite::Result<()> {
+        self.0.execute(
+            "UPDATE card SET last_seen_seq = ?1 WHERE id = ?2",
+            rusqlite::params![seq, card_id],
         )?;
         Ok(())
     }
@@ -532,12 +598,14 @@ impl Db {
         }
         match filter {
             "due" => {
-                sql.push_str(&format!(" AND c.due_at <= ?{idx}"));
+                sql.push_str(&format!(
+                    " AND c.next_eligible_seq <= (SELECT COUNT(*) FROM card_show_log)
+                      AND c.due_at <= ?{idx}"
+                ));
                 args.push(Box::new(fmt_time(Utc::now())));
             }
-            "new" => sql.push_str(" AND c.state = 'new'"),
-            "learning" => sql.push_str(" AND c.state IN ('learning','relearning')"),
-            "review" => sql.push_str(" AND c.state = 'review'"),
+            "new" => sql.push_str(" AND c.reps = 0 AND c.level = 0"),
+            "review" => sql.push_str(" AND c.reps > 0"),
             "archived" => sql.push_str(" AND c.state = 'archived'"),
             _ => {}
         }
@@ -673,39 +741,30 @@ mod tests {
         assert!(!card.locally_edited);
         assert_eq!(card.interval_minutes, None);
 
-        // Scheduled (non-new) cards: overdue ones come back oldest first.
-        for (id, minutes_ago) in [(a, 10), (b, 1)] {
+        // Scheduled (non-new) cards: eligible ones come back oldest-seen first.
+        for (id, last_seen) in [(a, 1), (b, 9)] {
             d.0.execute(
-                "UPDATE card SET state='review', interval_minutes=1440, due_at=?1 WHERE id=?2",
-                rusqlite::params![fmt_time(now - chrono::Duration::minutes(minutes_ago)), id],
+                "UPDATE card SET state='review', level=1, reps=2, last_seen_seq=?1,
+                 next_eligible_seq=0, due_at=?2 WHERE id=?3",
+                rusqlite::params![last_seen, fmt_time(now - chrono::Duration::minutes(5)), id],
             )
             .unwrap();
         }
-        let due = d
-            .due_review_cards(
-                now,
-                10,
-                now - chrono::Duration::hours(2),
-                now - chrono::Duration::hours(24),
-                2,
-            )
-            .unwrap();
+        let due = d.due_candidates(0, now, 10).unwrap();
         assert_eq!(due.len(), 2);
-        assert_eq!(due[0].title, "卡A");
+        assert_eq!(due[0].title, "卡A", "oldest last_seen first");
 
         // Archived cards never re-enter the queue.
         d.0.execute("UPDATE card SET state='archived' WHERE id=?1", [a])
             .unwrap();
-        let due = d
-            .due_review_cards(
-                now,
-                10,
-                now - chrono::Duration::hours(2),
-                now - chrono::Duration::hours(24),
-                2,
-            )
-            .unwrap();
+        let due = d.due_candidates(0, now, 10).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].title, "卡B");
+
+        // The sequence gate blocks reappearance independently of due_at.
+        d.0.execute("UPDATE card SET next_eligible_seq=99 WHERE id=?1", [b])
+            .unwrap();
+        assert!(d.due_candidates(0, now, 10).unwrap().is_empty());
+        assert!(d.due_candidates(99, now, 10).unwrap().len() == 1);
     }
 }

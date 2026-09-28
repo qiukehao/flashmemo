@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardDto, type RatingName } from "../lib/api";
-import { formatInterval, mapKeyToRating, type RatingAction } from "../lib/format";
+import { formatGap, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
 
 const appWindow = getCurrentWebviewWindow();
@@ -155,7 +155,7 @@ export default function ReviewPopup() {
       <footer className="popup-footer">
         {showHint && (
           <div className="popup-hint">
-            1=不了解 2=熟悉 3=可以讲出来，按钮下方的数字是下次出现间隔
+            1=不了解 2=熟悉 3=可以讲出来，按钮下方的数字是还要隔几张卡
           </div>
         )}
         <div className="popup-buttons">
@@ -170,7 +170,7 @@ export default function ReviewPopup() {
               onClick={() => void rate(r.name)}
             >
               {r.label}
-              <small>{formatInterval(previews[r.idx] ?? null)}</small>
+              <small>{formatGap(previews[r.idx] ?? null)}</small>
             </button>
           ))}
         </div>
