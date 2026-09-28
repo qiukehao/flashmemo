@@ -62,7 +62,7 @@ pub fn in_study_hours(now: DateTime<Local>, s: &EngineSettings) -> bool {
 
 /// Not paused = no future paused_until in settings.
 fn not_paused(s: &EngineSettings) -> bool {
-    s.paused_until.map_or(true, |t| Utc::now() >= t)
+    s.paused_until.is_none_or(|t| Utc::now() >= t)
 }
 
 /// SPEC §8.2: pop only when cards are due, within hours, unpaused, and while
@@ -138,7 +138,7 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
     let mut st = state.lock().expect("engine state poisoned");
     if settings.notify_mode == "notify" {
         // Light notification (SPEC §8.1); throttled to one per popup interval.
-        let due_notify = st.last_notify.map_or(true, |t| {
+        let due_notify = st.last_notify.is_none_or(|t| {
             Utc::now() - t >= chrono::Duration::minutes(settings.interval_min as i64)
         });
         if due_notify && app.get_webview_window("popup").is_none() {
