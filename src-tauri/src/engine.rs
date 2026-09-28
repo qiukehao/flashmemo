@@ -73,8 +73,10 @@ pub fn popup_decision(
     due_count > 0 && !popup_open && in_study_hours(now, s) && not_paused(s)
 }
 
-/// Center of the monitor work area (2026-09-28 调整：用户要求固定居中，替代
-/// 原随机位置方案). Vertically centered above the taskbar reserve.
+/// Center of the monitor work area, in **logical pixels** (2026-09-28 调整：
+/// 用户要求固定居中，替代原随机位置方案). Vertically centered above the
+/// taskbar reserve; the reserve is 48 logical px, matching the standard
+/// Windows taskbar height.
 pub fn popup_position(monitor: (f64, f64, f64, f64), win: (f64, f64)) -> (f64, f64) {
     let (mx, my, mw, mh) = monitor;
     let (ww, wh) = win;
@@ -127,8 +129,13 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>) -> bool {
     if popup_open {
         return false;
     }
-    let (mx, my, mw, mh) = cursor_monitor(app);
+    let (mx, my, mw, mh) = cursor_monitor_logical(app);
     let pos = popup_position((mx, my, mw, mh), POPUP_SIZE);
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[engine] popup at logical ({:.0}, {:.0}) on monitor ({:.0}, {:.0}, {:.0}, {:.0})",
+        pos.0, pos.1, mx, my, mw, mh
+    );
     match open_popup(app, pos) {
         Ok(_window) => true,
         Err(_) => false,
@@ -147,8 +154,13 @@ fn show_notification(app: &tauri::AppHandle, due: usize) {
         .show();
 }
 
-/// Monitor the cursor is on, or the primary monitor, or a 1920x1080 fallback.
-fn cursor_monitor(app: &tauri::AppHandle) -> (f64, f64, f64, f64) {
+/// Monitor the cursor is on, expressed in **logical** pixels because that is
+/// what Tauri's window APIs consume (`WebviewWindowBuilder::position`/
+/// `inner_size` are logical while `Monitor::size()`/`position()` are physical).
+/// Mixing the two breaks centering on scaled displays — e.g. a 2560x1440 panel
+/// at 150% reports 1707x960 logical; using physical numbers puts the window
+/// 1.5x too far from the origin.
+fn cursor_monitor_logical(app: &tauri::AppHandle) -> (f64, f64, f64, f64) {
     let fallback = (0.0, 0.0, 1920.0, 1080.0);
     let Ok(cursor) = app.cursor_position() else {
         return fallback;
@@ -158,16 +170,18 @@ fn cursor_monitor(app: &tauri::AppHandle) -> (f64, f64, f64, f64) {
         .ok()
         .flatten()
         .or_else(|| app.primary_monitor().ok().flatten());
-    monitor
-        .map(|m| {
+    match monitor {
+        Some(m) => {
+            let s = m.scale_factor();
             (
-                m.position().x as f64,
-                m.position().y as f64,
-                m.size().width as f64,
-                m.size().height as f64,
+                m.position().x as f64 / s,
+                m.position().y as f64 / s,
+                m.size().width as f64 / s,
+                m.size().height as f64 / s,
             )
-        })
-        .unwrap_or(fallback)
+        }
+        None => fallback,
+    }
 }
 
 fn open_popup(app: &tauri::AppHandle, pos: (f64, f64)) -> tauri::Result<tauri::WebviewWindow> {
@@ -249,17 +263,29 @@ mod tests {
 
     #[test]
     fn popup_position_is_workarea_center() {
+        // 100% scaling, 1920x1080 with a 48px taskbar.
         let monitor = (0.0, 0.0, 1920.0, 1080.0);
-        // Horizontally centered; vertically centered above the taskbar reserve.
         assert_eq!(
             popup_position(monitor, POPUP_SIZE),
             ((1920.0 - 440.0) / 2.0, (1080.0 - 48.0 - 380.0) / 2.0)
         );
-        // Works on offset monitors too (multi-display).
-        let offset = (1920.0, 0.0, 2560.0, 1440.0);
-        let (x, y) = popup_position(offset, POPUP_SIZE);
-        assert_eq!(x, 1920.0 + (2560.0 - 440.0) / 2.0);
-        assert_eq!(y, (1440.0 - 48.0 - 380.0) / 2.0);
+    }
+
+    #[test]
+    fn popup_position_handles_scaled_and_offset_monitors() {
+        // Regression for the reported bug: physical 2560x1440 at 150% scaling
+        // is 1706.67x960 logical; window APIs take logical pixels.
+        let primary = (0.0, 0.0, 2560.0 / 1.5, 1440.0 / 1.5);
+        let (x, y) = popup_position(primary, POPUP_SIZE);
+        let expect_x = (2560.0 / 1.5 - 440.0) / 2.0;
+        let expect_y = (1440.0 / 1.5 - 48.0 - 380.0) / 2.0;
+        assert!((x - expect_x).abs() < 0.01, "x {x} != {expect_x}");
+        assert!((y - expect_y).abs() < 0.01, "y {y} != {expect_y}");
+        // Portrait second monitor at negative offsets.
+        let portrait = (-1728.0 / 1.5, -768.0 / 1.5, 1728.0 / 1.5, 3072.0 / 1.5);
+        let (x, y) = popup_position(portrait, POPUP_SIZE);
+        assert!((x - (-1152.0 + (1152.0 - 440.0) / 2.0)).abs() < 0.01);
+        assert!((y - (-512.0 + (2048.0 - 48.0 - 380.0) / 2.0)).abs() < 0.01);
     }
 
     #[test]
