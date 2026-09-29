@@ -187,6 +187,29 @@ function findCard(id: number): CardDto | undefined {
   return cards.find((c) => c.id === id);
 }
 
+/** Immediate linked neighbours (manual links + chapter auto-chain), one hop,
+ *  mirroring SPEC §11.4. Archived/suspended cards still count as neighbours
+ *  (they satisfy the archive gate); callers filter as needed. */
+function neighboursOf(id: number): CardDto[] {
+  const card = findCard(id);
+  if (!card) return [];
+  const ids = new Set<number>();
+  for (const [f, t] of links) {
+    if (t === id) ids.add(f);
+    if (f === id) ids.add(t);
+  }
+  if (deckChain[card.deck] !== false) {
+    const sibs = cards
+      .filter((c) => c.deck === card.deck && c.chapter === card.chapter)
+      .sort((a, b) => a.id - b.id);
+    const pos = sibs.findIndex((c) => c.id === id);
+    if (pos > 0) ids.add(sibs[pos - 1].id);
+    if (pos >= 0 && pos + 1 < sibs.length) ids.add(sibs[pos + 1].id);
+  }
+  ids.delete(id);
+  return [...ids].map(findCard).filter(Boolean) as CardDto[];
+}
+
 /** Registers the in-memory command handlers; call once before rendering. */
 export function installMockBackend(): void {
   console.info(
@@ -237,18 +260,33 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
           s.unknown += 1;
           s.speak = 0;
           c.level = Math.max(1, c.level - 1);
-          if (s.unknown >= 3) c.needsAttention = true;
+          if (s.unknown >= 3) {
+            c.needsAttention = true;
+            // SPEC §11.4: the ⚠ propagates to immediate linked neighbours.
+            for (const n of neighboursOf(c.id)) {
+              if (n.state !== "suspended" && n.state !== "archived") n.needsAttention = true;
+            }
+          }
         } else if (rating === "speakable") {
           s.speak += 1;
           s.unknown = 0;
           c.level = Math.min(5, c.level + 1);
           c.needsAttention = false;
-          // Mirror the Rust auto-archive rule (threshold 3, switch on).
+          // Mirror the Rust auto-archive rule (threshold 3, switch on) and the
+          // chain gate: neighbours must have mastered it too.
           const archiveOn = (settings.archive_enabled ?? "1") !== "0";
           const threshold = Number.parseInt(settings.archive_threshold ?? "3", 10) || 3;
           if (archiveOn && s.speak >= threshold) {
-            c.state = "archived";
-            s.speak = 0;
+            const gateOk = neighboursOf(c.id).every(
+              (n) =>
+                n.state === "suspended" ||
+                n.state === "archived" ||
+                (streaks[n.id]?.speak ?? 0) >= threshold,
+            );
+            if (gateOk) {
+              c.state = "archived";
+              s.speak = 0;
+            }
           }
         } else {
           s.unknown = 0;

@@ -515,6 +515,57 @@ fn card_dto(db: &Db, card_id: i64) -> Result<CardDto, String> {
         .ok_or_else(|| "card disappeared".into())
 }
 
+/// Immediate linked neighbours of a card (SPEC §11.4): manual 前置/后置 edges
+/// plus, when the deck auto-chains, the chapter neighbours. One hop only;
+/// suspended/archived cards are excluded.
+fn linked_neighbours(db: &Db, card_id: i64) -> Result<Vec<i64>, String> {
+    let mut candidates = db.manual_prev_ids(card_id).map_err(|e| e.to_string())?;
+    candidates.extend(db.manual_next_ids(card_id).map_err(|e| e.to_string())?);
+    if db.deck_chain_enabled(card_id).map_err(|e| e.to_string())? {
+        candidates.extend(db.chapter_prev_id(card_id).map_err(|e| e.to_string())?);
+        candidates.extend(db.chapter_next_id(card_id).map_err(|e| e.to_string())?);
+    }
+    let mut ids = Vec::new();
+    for id in candidates {
+        if id == card_id || ids.contains(&id) {
+            continue;
+        }
+        if let Some(c) = db.get_card(id).map_err(|e| e.to_string())? {
+            if c.state != "suspended" && c.state != "archived" {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Chain archive gate (SPEC §11.4): every immediate neighbour must have
+/// mastered the card too (threshold reached) or already be archived. Cards the
+/// user deleted (suspended) never block.
+fn neighbours_all_mastered(db: &Db, card_id: i64, threshold: u32) -> Result<bool, String> {
+    let mut candidates = db.manual_prev_ids(card_id).map_err(|e| e.to_string())?;
+    candidates.extend(db.manual_next_ids(card_id).map_err(|e| e.to_string())?);
+    if db.deck_chain_enabled(card_id).map_err(|e| e.to_string())? {
+        candidates.extend(db.chapter_prev_id(card_id).map_err(|e| e.to_string())?);
+        candidates.extend(db.chapter_next_id(card_id).map_err(|e| e.to_string())?);
+    }
+    for id in candidates {
+        if id == card_id {
+            continue;
+        }
+        let Some(c) = db.get_card(id).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if c.state == "suspended" || c.state == "archived" {
+            continue;
+        }
+        if (c.speak_streak.max(0) as u32) < threshold {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Review-time linking context (SPEC §11.2): prerequisites shown as
 /// "知识铺垫" and the linked follow-up card for "顺链续复习".
 #[derive(Debug, Clone, Serialize)]
@@ -792,10 +843,30 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
     // rotation (data and level kept; restorable from the deck browser).
     let archive_enabled = get_u32(db, "archive_enabled", 1) != 0;
     let archive_threshold = get_u32(db, "archive_threshold", 3).clamp(2, 5);
-    let archived =
+    // Chain semantics (SPEC §11.4): a linked card graduates together with its
+    // immediate neighbours — one weak link keeps the group in the rotation.
+    let ready_to_archive =
         r == Rating::Speakable && archive_enabled && out.speak_streak >= archive_threshold;
+    let archived = ready_to_archive && neighbours_all_mastered(db, card_id, archive_threshold)?;
     let next_state = if archived { "archived" } else { "review" };
+    // Chain semantics: flagging a card as ⚠ also flags its immediate linked
+    // neighbours (one hop, no chain-wide propagation). Resolve the list before
+    // the transaction starts (the connection is borrowed mutably there).
+    let newly_flagged = out.needs_attention && !card.needs_attention;
+    let neighbours = if newly_flagged {
+        linked_neighbours(db, card_id)?
+    } else {
+        Vec::new()
+    };
     let tx = db.0.transaction().map_err(|e| e.to_string())?;
+    for neighbour in neighbours {
+        tx.execute(
+            "UPDATE card SET needs_attention = 1
+              WHERE id = ?1 AND state NOT IN ('suspended', 'archived')",
+            [neighbour],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.execute(
         "UPDATE card SET state=?11, level=?1, next_eligible_seq=?2, due_at=?3,
          unknown_streak=?4, speak_streak=?5, needs_attention=?6,
@@ -1480,7 +1551,8 @@ mod tests {
     fn attention_list_clear_and_reset() {
         let mut d = db();
         let c = add_card(&d, "D", "C", "难题", "x").unwrap();
-        let good = add_card(&d, "D", "C", "好题", "x").unwrap();
+        // Different chapter: no auto-chain, so propagation cannot affect it.
+        let good = add_card(&d, "D", "C2", "好题", "x").unwrap();
         rate(&mut d, good.id, "familiar").unwrap();
         for _ in 0..3 {
             rate(&mut d, c.id, "unknown").unwrap();
@@ -1661,6 +1733,62 @@ mod tests {
         )
         .unwrap();
         assert!(a_ctx.next.is_some());
+    }
+
+    #[test]
+    fn leech_propagates_to_immediate_neighbours() {
+        let mut d = db();
+        // Same chapter → auto-chained A—B—C; a fourth card lives elsewhere.
+        let _a = add_card(&d, "D", "C", "甲", "x").unwrap();
+        let b = add_card(&d, "D", "C", "乙", "x").unwrap();
+        let _c = add_card(&d, "D", "C", "丙", "x").unwrap();
+        let other = add_card(&d, "D", "别章", "无关卡", "x").unwrap();
+
+        for _ in 0..3 {
+            rate(&mut d, b.id, "unknown").unwrap();
+        }
+        let flagged: Vec<String> = attention_cards(&d)
+            .unwrap()
+            .iter()
+            .map(|c| c.title.clone())
+            .collect();
+        // The failing card plus BOTH immediate neighbours — but not the outsider.
+        assert_eq!(
+            flagged.len(),
+            3,
+            "chain neighbours join the ⚠ list: {flagged:?}"
+        );
+        assert!(flagged.contains(&"乙".to_string()));
+        assert!(flagged.contains(&"甲".to_string()));
+        assert!(flagged.contains(&"丙".to_string()));
+        assert!(!flagged.contains(&"无关卡".to_string()));
+        assert!(!d.get_card(other.id).unwrap().unwrap().needs_attention);
+    }
+
+    #[test]
+    fn archive_waits_for_linked_neighbours() {
+        let mut d = db();
+        let a = add_card(&d, "D", "C", "A", "x").unwrap();
+        let b = add_card(&d, "D", "C", "B", "x").unwrap();
+
+        // A reaches the threshold first, but B has not mastered it yet.
+        for _ in 0..3 {
+            rate(&mut d, a.id, "speakable").unwrap();
+        }
+        assert_eq!(
+            d.get_card(a.id).unwrap().unwrap().state,
+            "review",
+            "A must wait for its linked neighbour B"
+        );
+
+        // B completes its own streak → B graduates (A is already at threshold)…
+        for _ in 0..3 {
+            rate(&mut d, b.id, "speakable").unwrap();
+        }
+        assert_eq!(d.get_card(b.id).unwrap().unwrap().state, "archived");
+        // …and A graduates on its next Speakable.
+        rate(&mut d, a.id, "speakable").unwrap();
+        assert_eq!(d.get_card(a.id).unwrap().unwrap().state, "archived");
     }
 
     #[test]
