@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
 import { api } from "../lib/api";
+import { triggerReviewNow } from "../lib/env";
 import type { TabKey } from "../lib/tabs";
 
 export default function HomePage({
@@ -26,10 +26,7 @@ export default function HomePage({
         <span className="home-due-label">张卡片待复习</span>
       </div>
       <div className="home-actions">
-        <button
-          className="btn primary"
-          onClick={() => void emit("force-review")}
-        >
+        <button className="btn primary" onClick={() => void triggerReviewNow()}>
           立即复习
         </button>
         <button className="btn" onClick={() => onNavigate("import")}>

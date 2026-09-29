@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 /**
@@ -24,5 +25,18 @@ export function currentWindowLabel(): string {
     return getCurrentWebviewWindow().label;
   } catch {
     return "main";
+  }
+}
+
+/**
+ * "立即复习" entry point (home page / tray fast path). In the real app this
+ * emits `force-review` and the Rust engine opens the popup window; the browser
+ * mock has no engine, so it swaps the current tab to the popup view instead.
+ */
+export async function triggerReviewNow(): Promise<void> {
+  if (runningInTauri) {
+    await emit("force-review");
+  } else {
+    window.location.search = "?window=popup";
   }
 }
