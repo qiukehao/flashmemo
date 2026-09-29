@@ -24,6 +24,13 @@ export interface Stats {
   archivedCount: number;
 }
 
+/** Linked-card context for the review popup (SPEC §11.2). */
+export interface CardContext {
+  requires: CardDto[];
+  next: CardDto | null;
+  nextEligible: boolean;
+}
+
 export interface ImportFile {
   name: string;
   content: string;
@@ -49,6 +56,13 @@ export interface DeckOverview {
   chapterCount: number;
   cardCount: number;
   dueCount: number;
+  chainByOrder: boolean;
+}
+
+/** Manual link edges of one card (SPEC §11.1 card editor). */
+export interface CardLinks {
+  prev: CardDto[];
+  next: CardDto[];
 }
 
 /** SPEC §7 三档口述评分. */
@@ -88,6 +102,13 @@ export const api = {
   resetCardProgress: (cardId: number) => invoke<CardDto>("reset_card_progress", { cardId }),
   restoreCard: (cardId: number) => invoke<CardDto>("restore_card", { cardId }),
   backupNow: () => invoke<string>("backup_now"),
+  getCardContext: (cardId: number) => invoke<CardContext>("get_card_context", { cardId }),
+  getCardLinks: (cardId: number) => invoke<CardLinks>("get_card_links", { cardId }),
+  addCardLink: (fromId: number, toId: number) => invoke<void>("add_card_link", { fromId, toId }),
+  removeCardLink: (fromId: number, toId: number) =>
+    invoke<void>("remove_card_link", { fromId, toId }),
+  setDeckChain: (deck: string, enabled: boolean) =>
+    invoke<void>("set_deck_chain", { deck, enabled }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>
     invoke<void>("set_settings", { map }),

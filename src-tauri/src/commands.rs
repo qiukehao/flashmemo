@@ -201,6 +201,31 @@ pub fn backup_now(db: DbState) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn get_card_context(card_id: i64, db: DbState) -> Result<services::CardContextDto, String> {
+    services::card_context(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn get_card_links(card_id: i64, db: DbState) -> Result<services::CardLinksDto, String> {
+    services::card_links(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn add_card_link(from_id: i64, to_id: i64, db: DbState) -> Result<(), String> {
+    services::add_card_link(&lock(&db), from_id, to_id)
+}
+
+#[tauri::command]
+pub fn remove_card_link(from_id: i64, to_id: i64, db: DbState) -> Result<(), String> {
+    services::remove_card_link(&lock(&db), from_id, to_id)
+}
+
+#[tauri::command]
+pub fn set_deck_chain(deck: String, enabled: bool, db: DbState) -> Result<(), String> {
+    services::set_deck_chain(&lock(&db), &deck, enabled)
+}
+
+#[tauri::command]
 pub fn get_settings(db: DbState) -> Result<HashMap<String, String>, String> {
     Ok(services::list_settings(&lock(&db))?.into_iter().collect())
 }

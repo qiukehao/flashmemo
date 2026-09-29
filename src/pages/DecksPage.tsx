@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type CardDto, type DeckOverview } from "../lib/api";
+import { api, type CardDto, type CardLinks, type DeckOverview } from "../lib/api";
 
 const STATE_LABEL: Record<string, string> = {
   suspended: "已删除",
@@ -60,6 +60,11 @@ export default function DecksPage() {
   const [editing, setEditing] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
+  // Manual 前置/后置 links of the card being edited (SPEC §11.1).
+  const [links, setLinks] = useState<CardLinks | null>(null);
+  const [linkQuery, setLinkQuery] = useState("");
+  const [linkResults, setLinkResults] = useState<CardDto[]>([]);
+  const [linkMsg, setLinkMsg] = useState("");
 
   const flatMode = query.trim() !== "" || filter !== "all";
 
@@ -205,6 +210,67 @@ export default function DecksPage() {
     setEditing(card.id);
     setEditTitle(card.title);
     setEditContent(card.contentMd);
+    setLinks(null);
+    setLinkQuery("");
+    setLinkResults([]);
+    setLinkMsg("");
+    api
+      .getCardLinks(card.id)
+      .then(setLinks)
+      .catch(() => {});
+  }
+
+  // Debounced card search for the link picker (within the edited card's deck).
+  useEffect(() => {
+    if (editing == null || !linkQuery.trim()) {
+      setLinkResults([]);
+      return;
+    }
+    const editingCard = cards.find((x) => x.id === editing);
+    const t = setTimeout(() => {
+      api
+        .searchCards(linkQuery.trim(), editingCard?.deck ?? null, "all")
+        .then((rs) => setLinkResults(rs.filter((r) => r.id !== editing).slice(0, 6)))
+        .catch(() => setLinkResults([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [linkQuery, editing, cards]);
+
+  async function addLink(target: CardDto, asPrev: boolean) {
+    if (editing == null) return;
+    setLinkMsg("");
+    try {
+      if (asPrev) await api.addCardLink(target.id, editing);
+      else await api.addCardLink(editing, target.id);
+      setLinks(await api.getCardLinks(editing));
+      setLinkQuery("");
+      setLinkResults([]);
+    } catch (e) {
+      setLinkMsg(String(e));
+    }
+  }
+
+  async function removeLink(from: number, to: number) {
+    if (editing == null) return;
+    setLinkMsg("");
+    try {
+      await api.removeCardLink(from, to);
+      setLinks(await api.getCardLinks(editing));
+    } catch (e) {
+      setLinkMsg(String(e));
+    }
+  }
+
+  /** SPEC §11.1 卡包级开关: auto-chain by import order. */
+  async function toggleChain(o: DeckOverview) {
+    setError("");
+    try {
+      await api.setDeckChain(o.name, !o.chainByOrder);
+      flash(`「${o.name}」顺序串联已${o.chainByOrder ? "关闭" : "开启"}`);
+      loadOverview();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function doSaveEdit() {
@@ -249,6 +315,62 @@ export default function DecksPage() {
             <button className="btn" onClick={() => setEditing(null)}>
               取消
             </button>
+          </div>
+          {/* 手动前后置关联（SPEC §11.1）：只影响呈现与顺链，不影响调度 */}
+          <div className="link-editor">
+            <div className="muted small">
+              手动关联（复习时「知识铺垫 / 继续下一张」用；同章节顺序串联默认自动）
+            </div>
+            <div className="link-row">
+              <span className="muted small">前置：</span>
+              {links?.prev.length
+                ? links.prev.map((p) => (
+                    <span className="link-chip" key={p.id}>
+                      {p.title}
+                      <button title="移除" onClick={() => void removeLink(p.id, c.id)}>
+                        ×
+                      </button>
+                    </span>
+                  ))
+                : <span className="muted small">无</span>}
+            </div>
+            <div className="link-row">
+              <span className="muted small">后置：</span>
+              {links?.next.length
+                ? links.next.map((n) => (
+                    <span className="link-chip" key={n.id}>
+                      {n.title}
+                      <button title="移除" onClick={() => void removeLink(c.id, n.id)}>
+                        ×
+                      </button>
+                    </span>
+                  ))
+                : <span className="muted small">无</span>}
+            </div>
+            <input
+              placeholder="搜索本包卡片，添加为前置/后置…"
+              value={linkQuery}
+              onChange={(e) => setLinkQuery(e.target.value)}
+            />
+            {linkResults.length > 0 && (
+              <div className="link-results">
+                {linkResults.map((r) => (
+                  <div className="link-result" key={r.id}>
+                    <span className="card-title-cell">
+                      {r.title}
+                      <small className="muted"> {r.chapter}</small>
+                    </span>
+                    <button className="btn small" onClick={() => void addLink(r, true)}>
+                      设为前置
+                    </button>
+                    <button className="btn small" onClick={() => void addLink(r, false)}>
+                      设为后置
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {linkMsg && <div className="error small">{linkMsg}</div>}
           </div>
         </div>
       );
@@ -358,6 +480,13 @@ export default function DecksPage() {
                   {o.chapterCount} 章 · {o.cardCount} 卡 · 到期 {o.dueCount}
                 </span>
                 <span className="deck-actions">
+                  <button
+                    className="btn small"
+                    title="按导入顺序自动串联同章节卡片（知识铺垫与顺链续复习）"
+                    onClick={() => void toggleChain(o)}
+                  >
+                    🔗 {o.chainByOrder ? "串联中" : "已关闭"}
+                  </button>
                   <button className="btn small" onClick={() => void reviewDeck(o.name)}>
                     复习该包
                   </button>

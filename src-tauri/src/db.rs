@@ -410,6 +410,117 @@ impl Db {
         Ok(())
     }
 
+    // ---- linked cards (SPEC §11 连贯闪卡) ----
+
+    /// Manual link edge: `from` 前置 → `to` 后置. Idempotent.
+    pub fn add_card_link(&self, from: i64, to: i64) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "INSERT OR IGNORE INTO card_link(from_card_id, to_card_id) VALUES(?1, ?2)",
+            rusqlite::params![from, to],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn remove_card_link(&self, from: i64, to: i64) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "DELETE FROM card_link WHERE from_card_id = ?1 AND to_card_id = ?2",
+            rusqlite::params![from, to],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Manual prerequisites of a card (edges pointing at it).
+    pub fn manual_prev_ids(&self, card_id: i64) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT from_card_id FROM card_link WHERE to_card_id = ?1 ORDER BY from_card_id",
+        )?;
+        let rows = stmt.query_map([card_id], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// Manual follow-ups of a card (edges leaving it).
+    pub fn manual_next_ids(&self, card_id: i64) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT to_card_id FROM card_link WHERE from_card_id = ?1 ORDER BY to_card_id",
+        )?;
+        let rows = stmt.query_map([card_id], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// Auto-chain neighbours: previous/next card by insertion order inside the
+    /// same chapter (SPEC §11.1 rule 1).
+    pub fn chapter_prev_id(&self, card_id: i64) -> rusqlite::Result<Option<i64>> {
+        self.0.query_row(
+            "SELECT MAX(c2.id) FROM card c1 JOIN card c2 ON c2.chapter_id = c1.chapter_id
+                  WHERE c1.id = ?1 AND c2.id < ?1 AND c2.state != 'suspended'",
+            [card_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    }
+
+    pub fn chapter_next_id(&self, card_id: i64) -> rusqlite::Result<Option<i64>> {
+        self.0.query_row(
+            "SELECT MIN(c2.id) FROM card c1 JOIN card c2 ON c2.chapter_id = c1.chapter_id
+              WHERE c1.id = ?1 AND c2.id > ?1 AND c2.state != 'suspended'",
+            [card_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    }
+
+    /// Whether the card's deck has auto-chaining enabled (deck.chain_by_order).
+    pub fn deck_chain_enabled(&self, card_id: i64) -> rusqlite::Result<bool> {
+        self.0.query_row(
+            "SELECT d.chain_by_order FROM card c JOIN deck d ON d.id = c.deck_id WHERE c.id = ?1",
+            [card_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+    }
+
+    pub fn set_deck_chain(&self, deck: &str, enabled: bool) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE deck SET chain_by_order = ?1 WHERE name = ?2",
+            rusqlite::params![i64::from(enabled), deck],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// BFS along link edges: does `from` reach `to`? Used to reject link cycles.
+    pub fn link_reaches(&self, from: i64, to: i64) -> rusqlite::Result<bool> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = vec![from];
+        while let Some(cur) = queue.pop() {
+            if cur == to {
+                return Ok(true);
+            }
+            if !seen.insert(cur) {
+                continue;
+            }
+            for next in self.manual_next_ids(cur)? {
+                queue.push(next);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Is the card allowed to appear right now (seq gate + time floor)?
+    pub fn is_card_eligible(
+        &self,
+        card_id: i64,
+        seq: i64,
+        now: DateTime<Utc>,
+    ) -> rusqlite::Result<bool> {
+        self.0
+            .query_row(
+                "SELECT COUNT(*) FROM card
+              WHERE id = ?1 AND state NOT IN ('suspended', 'archived')
+                AND next_eligible_seq <= ?2 AND due_at <= ?3",
+                rusqlite::params![card_id, seq, fmt_time(now)],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+    }
+
     /// 疑难卡（⚠ 需专项理解）: flagged cards, most-forgotten first.
     pub fn attention_cards(&self) -> rusqlite::Result<Vec<Card>> {
         let sql = format!(

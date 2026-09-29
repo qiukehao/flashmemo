@@ -31,6 +31,8 @@ pub struct DeckOverview {
     pub chapter_count: i64,
     pub card_count: i64,
     pub due_count: i64,
+    /// SPEC §11.1 auto-chaining switch (deck.chain_by_order).
+    pub chain_by_order: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -237,7 +239,8 @@ pub fn list_overview(db: &Db) -> Result<Vec<DeckOverview>, String> {
         COALESCE(SUM(CASE WHEN c.next_eligible_seq <= (SELECT COUNT(*) FROM card_show_log)
                            AND c.due_at <= ?1
                            AND c.state NOT IN ('suspended','archived')
-                          THEN 1 ELSE 0 END), 0) AS due
+                          THEN 1 ELSE 0 END), 0) AS due,
+        d.chain_by_order
         FROM deck d
         LEFT JOIN chapter ch ON ch.deck_id = d.id
         LEFT JOIN card c ON c.chapter_id = ch.id
@@ -250,6 +253,7 @@ pub fn list_overview(db: &Db) -> Result<Vec<DeckOverview>, String> {
                 chapter_count: r.get(1)?,
                 card_count: r.get(2)?,
                 due_count: r.get(3)?,
+                chain_by_order: r.get::<_, i64>(4)? != 0,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -509,6 +513,149 @@ fn card_dto(db: &Db, card_id: i64) -> Result<CardDto, String> {
         .map_err(|e| e.to_string())?
         .map(|c| to_dto(&c))
         .ok_or_else(|| "card disappeared".into())
+}
+
+/// Review-time linking context (SPEC §11.2): prerequisites shown as
+/// "知识铺垫" and the linked follow-up card for "顺链续复习".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardContextDto {
+    pub requires: Vec<CardDto>,
+    pub next: Option<CardDto>,
+    /// Whether the follow-up card may appear right now (seq gate + time floor).
+    pub next_eligible: bool,
+}
+
+pub fn card_context(db: &Db, card_id: i64) -> Result<CardContextDto, String> {
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    let chained = if db.deck_chain_enabled(card_id).map_err(|e| e.to_string())? {
+        // Auto-chain: previous neighbour in the same chapter (1 level, SPEC §11.2).
+        db.chapter_prev_id(card_id).map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+
+    // Prerequisites: manual links first, then the auto neighbour; deduped.
+    // The global "连贯知识铺垫" switch (SPEC §16) can suppress the panel.
+    let mut requires: Vec<CardDto> = Vec::new();
+    let context_enabled = get_u32(db, "chain_context", 1) != 0;
+    let mut seen = std::collections::HashSet::new();
+    if context_enabled {
+        for id in db.manual_prev_ids(card_id).map_err(|e| e.to_string())? {
+            if seen.insert(id) {
+                requires.push(card_dto(db, id)?);
+            }
+        }
+        if let Some(prev) = chained {
+            if seen.insert(prev) {
+                requires.push(card_dto(db, prev)?);
+            }
+        }
+    }
+
+    // Follow-up: first manual next, otherwise the auto neighbour.
+    let manual_next = db
+        .manual_next_ids(card_id)
+        .map_err(|e| e.to_string())?
+        .first()
+        .copied();
+    let next_id = match manual_next {
+        Some(id) => Some(id),
+        None if db.deck_chain_enabled(card_id).map_err(|e| e.to_string())? => {
+            db.chapter_next_id(card_id).map_err(|e| e.to_string())?
+        }
+        None => None,
+    };
+
+    let mut next = None;
+    let mut next_eligible = false;
+    if let Some(id) = next_id {
+        let candidate = db
+            .get_card(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("link target missing")?;
+        if candidate.state != "suspended" {
+            let seq = db.show_count().map_err(|e| e.to_string())?;
+            next_eligible = db
+                .is_card_eligible(id, seq, Utc::now())
+                .map_err(|e| e.to_string())?;
+            next = Some(to_dto(&candidate));
+        }
+    }
+
+    Ok(CardContextDto {
+        requires,
+        next,
+        next_eligible,
+    })
+}
+
+/// Manual links only (the card editor in SPEC §11.1 shows these; auto-chain
+/// neighbours are computed on the fly and need no editing).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardLinksDto {
+    pub prev: Vec<CardDto>,
+    pub next: Vec<CardDto>,
+}
+
+pub fn card_links(db: &Db, card_id: i64) -> Result<CardLinksDto, String> {
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    let mut prev = Vec::new();
+    for id in db.manual_prev_ids(card_id).map_err(|e| e.to_string())? {
+        prev.push(card_dto(db, id)?);
+    }
+    let mut next = Vec::new();
+    for id in db.manual_next_ids(card_id).map_err(|e| e.to_string())? {
+        next.push(card_dto(db, id)?);
+    }
+    Ok(CardLinksDto { prev, next })
+}
+
+/// Add a manual 前置→后置 link (SPEC §11.1). Rejects self-links and any edge
+/// that would create a cycle.
+pub fn add_card_link(db: &Db, from_id: i64, to_id: i64) -> Result<(), String> {
+    if from_id == to_id {
+        return Err("不能把卡片连到它自己".into());
+    }
+    db.get_card(from_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    db.get_card(to_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("卡片不存在")?;
+    // A→B is a cycle when B already (transitively) points back at A.
+    if db.link_reaches(to_id, from_id).map_err(|e| e.to_string())? {
+        return Err("这两张卡之间已存在链条，会形成环".into());
+    }
+    db.add_card_link(from_id, to_id)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn remove_card_link(db: &Db, from_id: i64, to_id: i64) -> Result<(), String> {
+    if !db
+        .remove_card_link(from_id, to_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("关联不存在".into());
+    }
+    Ok(())
+}
+
+/// Per-deck auto-chaining switch (SPEC §11.1 "卡包级开关").
+pub fn set_deck_chain(db: &Db, deck: &str, enabled: bool) -> Result<(), String> {
+    if !db
+        .set_deck_chain(deck, enabled)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("卡包不存在".into());
+    }
+    Ok(())
 }
 
 /// Backup file name for a local date: `data-YYYYMMDD.db` (SPEC §14).
@@ -1404,6 +1551,116 @@ mod tests {
         assert_eq!(count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chain_context_lists_auto_neighbours() {
+        let d = db();
+        let a = add_card(&d, "D", "C", "第一", "x").unwrap();
+        let b = add_card(&d, "D", "C", "第二", "x").unwrap();
+        let c = add_card(&d, "D", "C", "第三", "x").unwrap();
+
+        let ctx = card_context(&d, b.id).unwrap();
+        assert_eq!(
+            ctx.requires
+                .iter()
+                .map(|r| r.title.as_str())
+                .collect::<Vec<_>>(),
+            ["第一"],
+            "auto-chain: previous card in the chapter"
+        );
+        assert_eq!(ctx.next.as_ref().unwrap().title, "第三");
+        assert!(ctx.next_eligible, "fresh cards are eligible immediately");
+
+        // First card has no predecessor; last has no successor.
+        assert!(card_context(&d, a.id).unwrap().requires.is_empty());
+        assert!(card_context(&d, c.id).unwrap().next.is_none());
+    }
+
+    #[test]
+    fn manual_links_override_auto_next_and_cycle_is_rejected() {
+        let d = db();
+        let a = add_card(&d, "D", "C", "A", "x").unwrap();
+        let b = add_card(&d, "D", "C", "B", "x").unwrap();
+        let c = add_card(&d, "D", "C", "C", "x").unwrap();
+
+        // Manual A→C overrides the auto neighbour B.
+        add_card_link(&d, a.id, c.id).unwrap();
+        let ctx = card_context(&d, a.id).unwrap();
+        assert_eq!(ctx.next.as_ref().unwrap().title, "C");
+
+        // Cycle guard: C→A would close the loop A→C→A.
+        assert!(add_card_link(&d, c.id, a.id).is_err());
+        // 3-cycle via a new edge C→…→A path.
+        add_card_link(&d, c.id, b.id).unwrap();
+        assert!(
+            add_card_link(&d, b.id, a.id).is_err(),
+            "B→A would create A→C→B→A"
+        );
+        // Self link rejected.
+        assert!(add_card_link(&d, a.id, a.id).is_err());
+
+        remove_card_link(&d, a.id, c.id).unwrap();
+        let ctx = card_context(&d, a.id).unwrap();
+        assert_eq!(ctx.next.as_ref().unwrap().title, "B", "auto next returns");
+    }
+
+    #[test]
+    fn deck_chain_switch_disables_auto_neighbours() {
+        let d = db();
+        add_card(&d, "D", "C", "第一", "x").unwrap();
+        let b = add_card(&d, "D", "C", "第二", "x").unwrap();
+        set_deck_chain(&d, "D", false).unwrap();
+        let ctx = card_context(&d, b.id).unwrap();
+        assert!(ctx.requires.is_empty());
+        assert!(ctx.next.is_none());
+        set_deck_chain(&d, "D", true).unwrap();
+        assert_eq!(card_context(&d, b.id).unwrap().requires.len(), 1);
+    }
+
+    #[test]
+    fn context_next_eligibility_follows_seq_gate() {
+        let d = db();
+        add_card(&d, "D", "C", "第一", "x").unwrap();
+        let b = add_card(&d, "D", "C", "第二", "x").unwrap();
+        // Gate the follow-up behind 50 shown cards.
+        d.0.execute(
+            "UPDATE card SET next_eligible_seq = 50 WHERE id = ?1",
+            [b.id],
+        )
+        .unwrap();
+        let ctx = card_context(&d, b.id).unwrap();
+        assert!(ctx.next.is_none(), "no successor for the last card");
+        let a_ctx = card_context(
+            &d,
+            d.0.query_row("SELECT id FROM card WHERE title='第一'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!a_ctx.next_eligible, "gated card is not eligible yet");
+        assert!(a_ctx.next.is_some());
+    }
+
+    #[test]
+    fn context_panel_switch_hides_prerequisites_only() {
+        let d = db();
+        add_card(&d, "D", "C", "第一", "x").unwrap();
+        let b = add_card(&d, "D", "C", "第二", "x").unwrap();
+        set_settings(&d, &[("chain_context".into(), "0".into())]).unwrap();
+        let ctx = card_context(&d, b.id).unwrap();
+        assert!(ctx.requires.is_empty(), "panel switch hides 知识铺垫");
+        // Follow-up continuation is unaffected.
+        let a_ctx = card_context(
+            &d,
+            d.0.query_row("SELECT id FROM card WHERE title='第一'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(a_ctx.next.is_some());
     }
 
     #[test]

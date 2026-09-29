@@ -90,6 +90,10 @@ interface MockStore {
   reviews: string[];
   /** Per-card consecutive-rating counters (mirror of the Rust scheduler). */
   streaks: Record<string, { unknown: number; speak: number }>;
+  /** Manual link edges [from, to] (前置 → 后置). */
+  links: [number, number][];
+  /** Per-deck auto-chain switches (default on). */
+  deckChain: Record<string, boolean>;
 }
 
 /** Data survives reloads (and the popup-view navigation) via localStorage. */
@@ -106,7 +110,7 @@ function saveStore(): void {
   try {
     localStorage.setItem(
       STORE_KEY,
-      JSON.stringify({ cards, settings, nextId, reviews, streaks }),
+      JSON.stringify({ cards, settings, nextId, reviews, streaks, links, deckChain }),
     );
   } catch {
     /* quota/private mode: mock data just won't persist */
@@ -116,6 +120,8 @@ function saveStore(): void {
 // Restore a previous session (imported notes, edits, settings) if present.
 let reviews: string[] = [];
 let streaks: Record<string, { unknown: number; speak: number }> = {};
+let links: [number, number][] = [];
+let deckChain: Record<string, boolean> = {};
 {
   const saved = loadStore();
   if (saved?.cards?.length) {
@@ -136,6 +142,8 @@ let streaks: Record<string, { unknown: number; speak: number }> = {};
     nextId = saved.nextId ?? cards.reduce((m, c) => Math.max(m, c.id), 0) + 1;
     reviews = saved.reviews ?? [];
     streaks = saved.streaks ?? {};
+    links = saved.links ?? [];
+    deckChain = saved.deckChain ?? {};
   }
 }
 
@@ -166,6 +174,9 @@ const MUTATING = new Set([
   "clear_attention",
   "reset_card_progress",
   "restore_card",
+  "add_card_link",
+  "remove_card_link",
+  "set_deck_chain",
 ]);
 
 function clone(c: CardDto): CardDto {
@@ -313,6 +324,72 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
       }
       case "backup_now":
         return "（浏览器调试模式：数据都在 localStorage，不生成真实备份文件）";
+      case "get_card_context": {
+        const id = Number(a.cardId);
+        const card = findCard(id);
+        if (!card) return { requires: [], next: null, nextEligible: false };
+        const chained = deckChain[card.deck] !== false;
+        const siblings = cards
+          .filter((c) => c.chapter === card.chapter && c.state !== "suspended")
+          .sort((x, y) => x.id - y.id);
+        const pos = siblings.findIndex((c) => c.id === id);
+        const requires = [
+          ...links.filter(([, to]) => to === id).map(([from]) => findCard(from)).filter(Boolean),
+        ] as CardDto[];
+        const manualNext = links.find(([from]) => from === id)?.[1];
+        let next: CardDto | null = null;
+        if (manualNext != null) next = findCard(manualNext) ?? null;
+        else if (chained && pos >= 0 && pos + 1 < siblings.length) next = siblings[pos + 1];
+        const autoPrev = chained && pos > 0 ? siblings[pos - 1] : null;
+        if (autoPrev && !requires.some((c) => c.id === autoPrev.id)) requires.push(autoPrev);
+        const eligible = !!next && next.state !== "archived" && next.state !== "suspended";
+        return { requires: requires.map(clone), next: next ? clone(next) : null, nextEligible: eligible };
+      }
+      case "get_card_links": {
+        const id = Number(a.cardId);
+        return {
+          prev: links
+            .filter(([, to]) => to === id)
+            .map(([from]) => findCard(from))
+            .filter(Boolean)
+            .map((c) => clone(c as CardDto)),
+          next: links
+            .filter(([from]) => from === id)
+            .map(([, to]) => findCard(to))
+            .filter(Boolean)
+            .map((c) => clone(c as CardDto)),
+        };
+      }
+      case "add_card_link": {
+        const from = Number(a.fromId);
+        const to = Number(a.toId);
+        if (from === to) throw new Error("不能把卡片连到它自己");
+        const reaches = (start: number, target: number): boolean => {
+          const seen = new Set<number>();
+          const queue = [start];
+          while (queue.length) {
+            const cur = queue.pop()!;
+            if (cur === target) return true;
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            for (const [f, t] of links) if (f === cur) queue.push(t);
+          }
+          return false;
+        };
+        if (reaches(to, from)) throw new Error("这两张卡之间已存在链条，会形成环");
+        if (!links.some(([f, t]) => f === from && t === to)) links.push([from, to]);
+        return null;
+      }
+      case "remove_card_link": {
+        const from = Number(a.fromId);
+        const to = Number(a.toId);
+        links = links.filter(([f, t]) => !(f === from && t === to));
+        return null;
+      }
+      case "set_deck_chain": {
+        deckChain[String(a.deck)] = Boolean(a.enabled);
+        return null;
+      }
     case "skip_card": {
       const c = findCard(Number(a.cardId));
       return c ? clone(c) : null;
@@ -380,6 +457,7 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         chapterCount: v.chapters.size,
         cardCount: v.count,
         dueCount: v.count,
+        chainByOrder: deckChain[name] !== false,
       }));
     }
     case "search_cards": {

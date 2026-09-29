@@ -622,3 +622,82 @@ body {
   text-align: right;
   flex: none;
 }
+
+/* ---------- linked cards (SPEC §11) ---------- */
+.popup-context {
+  margin-bottom: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.popup-context summary {
+  cursor: pointer;
+  color: #475569;
+  font-weight: 600;
+}
+.popup-context-card {
+  margin-top: 8px;
+}
+.popup-context-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #334155;
+  margin-bottom: 2px;
+}
+.popup-continue {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.popup-continue .btn {
+  flex: 1;
+}
+
+.link-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed #e5e7eb;
+  padding-top: 8px;
+}
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 12px;
+  color: #3730a3;
+}
+.link-chip button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: #6366f1;
+  font-size: 13px;
+  line-height: 1;
+}
+.link-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 6px;
+  background: #fff;
+}
+.link-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

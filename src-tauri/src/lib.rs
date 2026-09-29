@@ -141,6 +141,11 @@ pub fn run() {
             commands::reset_card_progress,
             commands::restore_card,
             commands::backup_now,
+            commands::get_card_context,
+            commands::get_card_links,
+            commands::add_card_link,
+            commands::remove_card_link,
+            commands::set_deck_chain,
             commands::get_settings,
             commands::set_settings,
         ])
