@@ -128,6 +128,11 @@ pub fn run() {
             commands::preview_intervals,
             commands::mark_card_shown,
             commands::due_count,
+            commands::get_stats,
+            commands::list_attention_cards,
+            commands::clear_attention,
+            commands::reset_card_progress,
+            commands::restore_card,
             commands::get_settings,
             commands::set_settings,
         ])

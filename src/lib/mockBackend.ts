@@ -25,6 +25,7 @@ const cards: CardDto[] = [
     dueAt: "2026-09-28T00:00:00.000Z",
     needsAttention: false,
     level: 2,
+    lapses: 0,
   },
   {
     id: 2,
@@ -37,6 +38,7 @@ const cards: CardDto[] = [
     dueAt: "2026-09-28T00:00:00.000Z",
     needsAttention: false,
     level: 1,
+    lapses: 0,
   },
   {
     id: 3,
@@ -49,6 +51,7 @@ const cards: CardDto[] = [
     dueAt: "2026-09-28T00:00:00.000Z",
     needsAttention: true,
     level: 2,
+    lapses: 3,
   },
   {
     id: 4,
@@ -61,6 +64,7 @@ const cards: CardDto[] = [
     dueAt: "2026-09-28T00:00:00.000Z",
     needsAttention: false,
     level: 0,
+    lapses: 0,
   },
 ];
 
@@ -82,6 +86,10 @@ interface MockStore {
   cards: CardDto[];
   settings: MockSettings;
   nextId: number;
+  /** ISO timestamps of ratings — drives the dashboard stats. */
+  reviews: string[];
+  /** Per-card consecutive-rating counters (mirror of the Rust scheduler). */
+  streaks: Record<string, { unknown: number; speak: number }>;
 }
 
 /** Data survives reloads (and the popup-view navigation) via localStorage. */
@@ -96,19 +104,38 @@ function loadStore(): MockStore | null {
 
 function saveStore(): void {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({ cards, settings, nextId }));
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({ cards, settings, nextId, reviews, streaks }),
+    );
   } catch {
     /* quota/private mode: mock data just won't persist */
   }
 }
 
 // Restore a previous session (imported notes, edits, settings) if present.
+let reviews: string[] = [];
+let streaks: Record<string, { unknown: number; speak: number }> = {};
 {
   const saved = loadStore();
   if (saved?.cards?.length) {
-    cards.splice(0, cards.length, ...saved.cards);
+    // Normalise cards persisted by older mock versions (fields added later
+    // would otherwise be undefined and poison arithmetic, e.g. NaN lapses).
+    cards.splice(
+      0,
+      cards.length,
+      ...saved.cards.map((c) => ({
+        ...c,
+        lapses: c.lapses ?? 0,
+        level: c.level ?? 0,
+        needsAttention: c.needsAttention ?? false,
+        state: c.state ?? "new",
+      })),
+    );
     Object.assign(settings, saved.settings ?? {});
     nextId = saved.nextId ?? cards.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    reviews = saved.reviews ?? [];
+    streaks = saved.streaks ?? {};
   }
 }
 
@@ -136,6 +163,9 @@ const MUTATING = new Set([
   "rate_card",
   "skip_card",
   "set_settings",
+  "clear_attention",
+  "reset_card_progress",
+  "restore_card",
 ]);
 
 function clone(c: CardDto): CardDto {
@@ -187,10 +217,98 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
       return [3, 8, 20];
     case "rate_card": {
       const c = findCard(Number(a.cardId));
+      const rating = String(a.rating ?? "familiar");
+      reviews.push(new Date().toISOString());
       if (c) {
-        c.level = Math.min(5, c.level + 1);
-        c.needsAttention = false;
+        const s = (streaks[c.id] ??= { unknown: 0, speak: 0 });
+        if (rating === "unknown") {
+          c.lapses += 1;
+          s.unknown += 1;
+          s.speak = 0;
+          c.level = Math.max(1, c.level - 1);
+          if (s.unknown >= 3) c.needsAttention = true;
+        } else if (rating === "speakable") {
+          s.speak += 1;
+          s.unknown = 0;
+          c.level = Math.min(5, c.level + 1);
+          c.needsAttention = false;
+          // Mirror the Rust auto-archive rule (threshold 3, switch on).
+          const archiveOn = (settings.archive_enabled ?? "1") !== "0";
+          const threshold = Number.parseInt(settings.archive_threshold ?? "3", 10) || 3;
+          if (archiveOn && s.speak >= threshold) {
+            c.state = "archived";
+            s.speak = 0;
+          }
+        } else {
+          s.unknown = 0;
+          s.speak = 0;
+          c.level = Math.max(1, c.level);
+        }
       }
+      return c ? clone(c) : null;
+    }
+    case "get_stats": {
+      const dayOf = (iso: string) => new Date(iso).toLocaleDateString("sv"); // YYYY-MM-DD local
+      const today = new Date().toLocaleDateString("sv");
+      const byDay = new Map<string, number>();
+      for (const iso of reviews) {
+        const d = dayOf(iso);
+        byDay.set(d, (byDay.get(d) ?? 0) + 1);
+      }
+      const last7: number[] = [];
+      let streak = 0;
+      const cursor = new Date();
+      for (let back = 6; back >= 0; back--) {
+        const d = new Date();
+        d.setDate(cursor.getDate() - back);
+        last7.push(byDay.get(d.toLocaleDateString("sv")) ?? 0);
+      }
+      {
+        const d = new Date();
+        if ((byDay.get(d.toLocaleDateString("sv")) ?? 0) === 0) d.setDate(d.getDate() - 1);
+        while ((byDay.get(d.toLocaleDateString("sv")) ?? 0) > 0) {
+          streak += 1;
+          d.setDate(d.getDate() - 1);
+        }
+      }
+      const live = cards.filter((c) => c.state !== "suspended" && c.state !== "archived");
+      const dist = [0, 0, 0, 0, 0, 0];
+      for (const c of live) dist[Math.min(Math.max(c.level, 0), 5)] += 1;
+      return {
+        todayReviewed: byDay.get(today) ?? 0,
+        dueCount: live.length,
+        totalCards: cards.filter((c) => c.state !== "suspended").length,
+        streakDays: streak,
+        levelDistribution: dist,
+        last7Days: last7,
+        attentionCount: cards.filter((c) => c.needsAttention && c.state !== "suspended").length,
+        archivedCount: cards.filter((c) => c.state === "archived").length,
+      };
+    }
+    case "list_attention_cards":
+      return cards
+        .filter((c) => c.needsAttention && c.state !== "suspended")
+        .sort((x, y) => y.lapses - x.lapses)
+        .map(clone);
+    case "clear_attention": {
+      const c = findCard(Number(a.cardId));
+      if (c) c.needsAttention = false;
+      return c ? clone(c) : null;
+    }
+    case "reset_card_progress": {
+      const c = findCard(Number(a.cardId));
+      if (c) {
+        c.state = "review";
+        c.level = 1;
+        c.lapses = 0;
+        c.needsAttention = false;
+        streaks[c.id] = { unknown: 0, speak: 0 };
+      }
+      return c ? clone(c) : null;
+    }
+    case "restore_card": {
+      const c = findCard(Number(a.cardId));
+      if (c && c.state === "archived") c.state = "review";
       return c ? clone(c) : null;
     }
     case "skip_card": {
@@ -223,6 +341,7 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         dueAt: new Date().toISOString(),
         needsAttention: false,
         level: 0,
+        lapses: 0,
       };
       cards.push(card);
       return clone(card);
@@ -270,10 +389,16 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         .filter((c) =>
           q ? c.title.toLowerCase().includes(q) || c.contentMd.toLowerCase().includes(q) : true,
         )
-        .filter((c) =>
-          filter === "new" ? c.level === 0 : filter === "review" ? c.level > 0 : true,
-        )
-        .map(clone);
+      .filter((c) =>
+        filter === "new"
+          ? c.level === 0
+          : filter === "review"
+            ? c.level > 0 && c.state !== "archived"
+            : filter === "archived"
+              ? c.state === "archived"
+              : true,
+      )
+      .map(clone);
     }
     case "import_markdown": {
       // Real parse (TS mirror of parser.rs) so import flows are testable in
@@ -295,6 +420,7 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
                 dueAt: new Date().toISOString(),
                 needsAttention: false,
                 level: 0,
+                lapses: 0,
               });
               added += 1;
             }

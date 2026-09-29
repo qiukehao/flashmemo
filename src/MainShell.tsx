@@ -4,11 +4,13 @@ import AddCardPage from "./pages/AddCardPage";
 import DecksPage from "./pages/DecksPage";
 import HomePage from "./pages/HomePage";
 import ImportPage from "./pages/ImportPage";
+import LeechesPage from "./pages/LeechesPage";
 import SettingsPage from "./pages/SettingsPage";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "home", label: "首页" },
   { key: "decks", label: "卡包" },
+  { key: "leeches", label: "疑难卡" },
   { key: "import", label: "导入" },
   { key: "add", label: "添加卡片" },
   { key: "settings", label: "设置" },
@@ -41,6 +43,7 @@ export default function MainShell() {
       <main className="shell-main">
         {tab === "home" && <HomePage key={bump} onNavigate={navigate} />}
         {tab === "decks" && <DecksPage key={bump} />}
+        {tab === "leeches" && <LeechesPage key={bump} />}
         {tab === "import" && <ImportPage key={bump} onDone={navigate} />}
         {tab === "add" && <AddCardPage key={bump} onSaved={navigate} />}
         {tab === "settings" && <SettingsPage key={bump} />}

@@ -30,6 +30,7 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "due", label: "可复习" },
   { key: "new", label: "新卡" },
   { key: "review", label: "已复习" },
+  { key: "archived", label: "已归档" },
 ];
 
 function fmtDue(iso: string): string {
@@ -178,8 +179,7 @@ export default function DecksPage() {
     }
   }
 
-  async function doDeleteCard(card: CardDto) {
-    if (!confirm(`确定删除卡片「${card.title}」？`)) return;
+  async function doDeleteCard(card: CardDto) {    if (!confirm(`确定删除卡片「${card.title}」？`)) return;
     setError("");
     try {
       await api.deleteCard(card.id);
@@ -214,6 +214,18 @@ export default function DecksPage() {
       await api.updateCard(editing, editTitle, editContent);
       flash("卡片已保存");
       setEditing(null);
+      refreshCurrent();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** SPEC §12.2: archived cards come back with their level intact. */
+  async function doRestore(card: CardDto) {
+    setError("");
+    try {
+      await api.restoreCard(card.id);
+      flash(`「${card.title}」已恢复到复习队列`);
       refreshCurrent();
     } catch (e) {
       setError(String(e));
@@ -257,9 +269,19 @@ export default function DecksPage() {
           {levelLabel(c.level, c.state)} · {fmtDue(c.dueAt)}
         </span>
         <span className="deck-actions">
-          <button className="btn small" onClick={() => startEdit(c)}>
-            编辑
-          </button>
+          {c.state === "archived" ? (
+            <button
+              className="btn small primary"
+              onClick={() => void doRestore(c)}
+              title="恢复后回到轮换队列，熟练等级保留"
+            >
+              恢复
+            </button>
+          ) : (
+            <button className="btn small" onClick={() => startEdit(c)}>
+              编辑
+            </button>
+          )}
           <button className="btn small danger" onClick={() => void doDeleteCard(c)}>
             删除
           </button>

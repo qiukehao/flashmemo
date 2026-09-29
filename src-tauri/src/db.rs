@@ -364,6 +364,85 @@ impl Db {
         )
     }
 
+    /// Reviews per local day since `cutoff` (UTC), oldest first — the source
+    /// for "today" counters, the 7-day chart and the streak walk (SPEC §14).
+    pub fn review_counts_by_day(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> rusqlite::Result<Vec<(String, i64)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT date(reviewed_at, 'localtime') AS day, COUNT(*)
+               FROM review_log WHERE reviewed_at >= ?1
+              GROUP BY day ORDER BY day",
+        )?;
+        let rows = stmt.query_map([fmt_time(cutoff)], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Live (non-suspended, non-archived) cards per proficiency level 0..=5.
+    pub fn level_distribution(&self) -> rusqlite::Result<[i64; 6]> {
+        let mut out = [0i64; 6];
+        let mut stmt = self.0.prepare(
+            "SELECT MIN(level, 5) AS lv, COUNT(*) FROM card
+              WHERE state NOT IN ('suspended', 'archived') GROUP BY lv",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (lv, n) = row?;
+            out[(lv.max(0) as usize).min(5)] = n;
+        }
+        Ok(out)
+    }
+
+    pub fn count_by_state(&self, state: &str) -> rusqlite::Result<i64> {
+        self.0
+            .query_row("SELECT COUNT(*) FROM card WHERE state = ?1", [state], |r| {
+                r.get(0)
+            })
+    }
+
+    /// 疑难卡（⚠ 需专项理解）: flagged cards, most-forgotten first.
+    pub fn attention_cards(&self) -> rusqlite::Result<Vec<Card>> {
+        let sql = format!(
+            "{} WHERE c.needs_attention = 1 AND c.state != 'suspended'
+             ORDER BY c.lapses DESC, c.id ASC",
+            Self::CARD_SELECT
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map([], Self::row_to_card)?;
+        rows.collect()
+    }
+
+    /// Clear the ⚠ flag without touching scheduling state (SPEC §12.1).
+    pub fn clear_attention(&self, card_id: i64) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE card SET needs_attention = 0 WHERE id = ?1 AND needs_attention = 1",
+            [card_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// SPEC §12.1 "重置进度重来": back to level 1, due immediately, no streaks.
+    pub fn reset_progress(&self, card_id: i64, now: DateTime<Utc>) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE card SET state='review', level=1, next_eligible_seq=0, due_at=?1,
+             unknown_streak=0, speak_streak=0, needs_attention=0, lapses=0
+             WHERE id=?2 AND state != 'suspended'",
+            rusqlite::params![fmt_time(now), card_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// SPEC §12.2: restore an archived card into the rotation, keeping level.
+    pub fn restore_card(&self, card_id: i64, now: DateTime<Utc>) -> rusqlite::Result<bool> {
+        let n = self.0.execute(
+            "UPDATE card SET state='review', next_eligible_seq=0, due_at=?1
+             WHERE id=?2 AND state = 'archived'",
+            rusqlite::params![fmt_time(now), card_id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Total cards ever shown — the global `review_seq` (design §1).
     pub fn show_count(&self) -> rusqlite::Result<i64> {
         self.0
@@ -607,7 +686,7 @@ impl Db {
                 args.push(Box::new(fmt_time(Utc::now())));
             }
             "new" => sql.push_str(" AND c.reps = 0 AND c.level = 0"),
-            "review" => sql.push_str(" AND c.reps > 0"),
+            "review" => sql.push_str(" AND c.reps > 0 AND c.state != 'archived'"),
             "archived" => sql.push_str(" AND c.state = 'archived'"),
             _ => {}
         }

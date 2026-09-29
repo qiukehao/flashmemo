@@ -166,6 +166,31 @@ pub fn due_count(db: DbState) -> Result<i64, String> {
 }
 
 #[tauri::command]
+pub fn get_stats(db: DbState) -> Result<services::StatsDto, String> {
+    services::get_stats(&lock(&db))
+}
+
+#[tauri::command]
+pub fn list_attention_cards(db: DbState) -> Result<Vec<CardDto>, String> {
+    services::attention_cards(&lock(&db))
+}
+
+#[tauri::command]
+pub fn clear_attention(card_id: i64, db: DbState) -> Result<CardDto, String> {
+    services::clear_attention(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn reset_card_progress(card_id: i64, db: DbState) -> Result<CardDto, String> {
+    services::reset_progress(&lock(&db), card_id)
+}
+
+#[tauri::command]
+pub fn restore_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
+    services::restore_card(&lock(&db), card_id)
+}
+
+#[tauri::command]
 pub fn get_settings(db: DbState) -> Result<HashMap<String, String>, String> {
     Ok(services::list_settings(&lock(&db))?.into_iter().collect())
 }

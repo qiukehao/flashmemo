@@ -21,6 +21,7 @@ pub struct CardDto {
     pub due_at: String,
     pub needs_attention: bool,
     pub level: u32,
+    pub lapses: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +79,7 @@ fn to_dto(c: &Card) -> CardDto {
         due_at: db::fmt_time(c.due_at),
         needs_attention: c.needs_attention,
         level: c.level.max(0) as u32,
+        lapses: c.lapses,
     }
 }
 
@@ -398,6 +400,117 @@ pub fn update_card_content(db: &Db, card_id: i64, content_md: &str) -> Result<Ca
         .ok_or_else(|| "card disappeared after update".into())
 }
 
+/// Dashboard statistics (SPEC §14): counters, level distribution, 7-day chart,
+/// streak. Local-day based so "today" matches the user's clock.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsDto {
+    pub today_reviewed: i64,
+    pub due_count: i64,
+    pub total_cards: i64,
+    pub streak_days: i64,
+    pub level_distribution: Vec<i64>,
+    /// Oldest → newest, exactly 7 entries.
+    pub last7_days: Vec<i64>,
+    pub attention_count: i64,
+    pub archived_count: i64,
+}
+
+pub fn get_stats(db: &Db) -> Result<StatsDto, String> {
+    use chrono::{Datelike, Duration as ChronoDuration, Local};
+
+    let today = Local::now().date_naive();
+    let cutoff = Utc::now() - ChronoDuration::days(31);
+    let by_day: std::collections::HashMap<String, i64> = db
+        .review_counts_by_day(cutoff)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+    let day_key = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+
+    let today_reviewed = by_day.get(&day_key(today)).copied().unwrap_or(0);
+    let mut last7 = Vec::with_capacity(7);
+    for back in (0..7).rev() {
+        let d = today - ChronoDuration::days(back);
+        last7.push(by_day.get(&day_key(d)).copied().unwrap_or(0));
+    }
+
+    // Streak: count back from today; a day with no reviews yet doesn't break
+    // yesterday's run (you just haven't started today).
+    let mut streak = 0i64;
+    let mut cursor = today;
+    if by_day.get(&day_key(cursor)).copied().unwrap_or(0) == 0 {
+        cursor -= ChronoDuration::days(1);
+    }
+    while by_day.get(&day_key(cursor)).copied().unwrap_or(0) > 0 {
+        streak += 1;
+        cursor -= ChronoDuration::days(1);
+        if cursor.year() < 2000 {
+            break; // safety stop
+        }
+    }
+
+    let seq = db.show_count().map_err(|e| e.to_string())?;
+    Ok(StatsDto {
+        today_reviewed,
+        due_count: db
+            .eligible_count(seq, Utc::now())
+            .map_err(|e| e.to_string())?,
+        total_cards: db.count_by_state("new").map_err(|e| e.to_string())?
+            + db.count_by_state("review").map_err(|e| e.to_string())?
+            + db.count_by_state("archived").map_err(|e| e.to_string())?,
+        streak_days: streak,
+        level_distribution: db.level_distribution().map_err(|e| e.to_string())?.to_vec(),
+        last7_days: last7,
+        attention_count: db.attention_cards().map_err(|e| e.to_string())?.len() as i64,
+        archived_count: db.count_by_state("archived").map_err(|e| e.to_string())?,
+    })
+}
+
+/// 疑难卡列表（SPEC §12.1）: flagged cards with their lapse counts.
+pub fn attention_cards(db: &Db) -> Result<Vec<CardDto>, String> {
+    Ok(db
+        .attention_cards()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(to_dto)
+        .collect())
+}
+
+pub fn clear_attention(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    if !db.clear_attention(card_id).map_err(|e| e.to_string())? {
+        return Err("卡片不存在或未标记".into());
+    }
+    card_dto(db, card_id)
+}
+
+pub fn reset_progress(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    if !db
+        .reset_progress(card_id, Utc::now())
+        .map_err(|e| e.to_string())?
+    {
+        return Err("卡片不存在".into());
+    }
+    card_dto(db, card_id)
+}
+
+pub fn restore_card(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    if !db
+        .restore_card(card_id, Utc::now())
+        .map_err(|e| e.to_string())?
+    {
+        return Err("卡片不在归档状态".into());
+    }
+    card_dto(db, card_id)
+}
+
+fn card_dto(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "card disappeared".into())
+}
+
 /// Search + filter for the deck browser (SPEC §15.2 搜索/筛选).
 pub fn search_cards(
     db: &Db,
@@ -464,9 +577,16 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
 
     let out = scheduler::review(&to_sched(&card), r, seq.max(0) as u64, now, &cfg);
     let lapsed = i64::from(r == Rating::Unknown);
+    // SPEC §12.2 自动归档: N consecutive "可以讲出来" retires the card from the
+    // rotation (data and level kept; restorable from the deck browser).
+    let archive_enabled = get_u32(db, "archive_enabled", 1) != 0;
+    let archive_threshold = get_u32(db, "archive_threshold", 3).clamp(2, 5);
+    let archived =
+        r == Rating::Speakable && archive_enabled && out.speak_streak >= archive_threshold;
+    let next_state = if archived { "archived" } else { "review" };
     let tx = db.0.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "UPDATE card SET state='review', level=?1, next_eligible_seq=?2, due_at=?3,
+        "UPDATE card SET state=?11, level=?1, next_eligible_seq=?2, due_at=?3,
          unknown_streak=?4, speak_streak=?5, needs_attention=?6,
          last_review_at=?7, last_seen_seq=?8, reps=reps+1, lapses=lapses+?9
          WHERE id=?10",
@@ -481,6 +601,7 @@ pub fn rate(db: &mut Db, card_id: i64, rating: &str) -> Result<CardDto, String> 
             seq,
             lapsed,
             card_id,
+            next_state,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1040,6 +1161,141 @@ mod tests {
         let p = preview_intervals(&d, c.id).unwrap();
         assert_eq!(p[1], 8, "familiar from level 1: max(level_gap[1]=2, 8)");
         assert_eq!(p[2], 20, "speakable to level 2: max(level_gap[2]=4, 20)");
+    }
+
+    // ---- dashboard & leech/archive loop (M2) ----
+
+    fn local_noon_utc(days_ago: i64) -> chrono::DateTime<Utc> {
+        use chrono::{Local, TimeZone};
+        let day = Local::now().date_naive() - chrono::Duration::days(days_ago);
+        Local
+            .from_local_datetime(&day.and_hms_opt(12, 0, 0).unwrap())
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn insert_log(db: &Db, card_id: i64, rating: i64, at: chrono::DateTime<Utc>) {
+        db.0.execute(
+            "INSERT INTO review_log(card_id, rating, state_before, reviewed_at)
+             VALUES(?1, ?2, 'review', ?3)",
+            rusqlite::params![card_id, rating, db::fmt_time(at)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn stats_count_today_levels_and_chart() {
+        let mut d = db();
+        let a = add_card(&d, "D", "C", "卡A", "x").unwrap();
+        add_card(&d, "D", "C", "卡B", "x").unwrap();
+        rate(&mut d, a.id, "familiar").unwrap(); // today's review + level 1
+
+        let s = get_stats(&d).unwrap();
+        assert_eq!(s.today_reviewed, 1);
+        assert_eq!(s.last7_days.len(), 7);
+        assert_eq!(s.last7_days[6], 1, "newest day is today");
+        assert_eq!(s.streak_days, 1);
+        assert_eq!(s.total_cards, 2);
+        let dist_sum: i64 = s.level_distribution.iter().sum();
+        assert_eq!(dist_sum, 2);
+        assert_eq!(s.level_distribution[1], 1, "one card moved to level 1");
+        assert_eq!(s.level_distribution[0], 1, "the other is still new");
+    }
+
+    #[test]
+    fn streak_walks_back_consecutive_days_only() {
+        let d = db();
+        let c = add_card(&d, "D", "C", "T", "x").unwrap();
+        for days_ago in [0, 1, 2, 5] {
+            insert_log(&d, c.id, 2, local_noon_utc(days_ago));
+        }
+        let s = get_stats(&d).unwrap();
+        assert_eq!(s.streak_days, 3, "today+yesterday+2 days ago, then a gap");
+        assert_eq!(
+            s.last7_days[1], 1,
+            "5 days ago = index 1 of the 7-day window"
+        );
+    }
+
+    #[test]
+    fn archive_after_three_speakable_and_restore() {
+        let mut d = db();
+        let c = add_card(&d, "D", "C", "T", "x").unwrap();
+        for _ in 0..3 {
+            rate(&mut d, c.id, "speakable").unwrap();
+        }
+        let card = d.get_card(c.id).unwrap().unwrap();
+        assert_eq!(
+            card.state, "archived",
+            "3 consecutive Speakable retires the card"
+        );
+        assert_eq!(card.level, 3, "level kept for restore");
+        assert_eq!(get_stats(&d).unwrap().archived_count, 1);
+
+        // Archived cards leave the rotation…
+        assert!(due_queue(&d, 10).unwrap().is_empty());
+        // …and come back unchanged.
+        let restored = restore_card(&d, c.id).unwrap();
+        assert_eq!(restored.state, "review");
+        assert_eq!(restored.level, 3);
+        assert_eq!(due_queue(&d, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn archive_respects_threshold_and_switch() {
+        let mut d = db();
+        let c = add_card(&d, "D", "C", "T", "x").unwrap();
+        // Disabled switch: never archives.
+        set_settings(&d, &[("archive_enabled".into(), "0".into())]).unwrap();
+        for _ in 0..4 {
+            rate(&mut d, c.id, "speakable").unwrap();
+        }
+        assert_eq!(d.get_card(c.id).unwrap().unwrap().state, "review");
+
+        // Smaller threshold (2) archives sooner.
+        set_settings(
+            &d,
+            &[
+                ("archive_enabled".into(), "1".into()),
+                ("archive_threshold".into(), "2".into()),
+            ],
+        )
+        .unwrap();
+        rate(&mut d, c.id, "speakable").unwrap(); // streak 5 ≥ 2
+        assert_eq!(d.get_card(c.id).unwrap().unwrap().state, "archived");
+    }
+
+    #[test]
+    fn attention_list_clear_and_reset() {
+        let mut d = db();
+        let c = add_card(&d, "D", "C", "难题", "x").unwrap();
+        let good = add_card(&d, "D", "C", "好题", "x").unwrap();
+        rate(&mut d, good.id, "familiar").unwrap();
+        for _ in 0..3 {
+            rate(&mut d, c.id, "unknown").unwrap();
+        }
+        let flagged = d.get_card(c.id).unwrap().unwrap();
+        assert!(flagged.needs_attention);
+
+        let list = attention_cards(&d).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "难题");
+        assert_eq!(list[0].lapses, 3, "lapse count travels with the DTO");
+        assert_eq!(get_stats(&d).unwrap().attention_count, 1);
+
+        // Clear the flag without touching scheduling.
+        let cleared = clear_attention(&d, c.id).unwrap();
+        assert!(!cleared.needs_attention);
+        assert!(attention_cards(&d).unwrap().is_empty());
+
+        // Reset progress: back to level 1, streaks and lapses wiped.
+        let reset = reset_progress(&d, c.id).unwrap();
+        assert_eq!(reset.level, 1);
+        let raw = d.get_card(c.id).unwrap().unwrap();
+        assert_eq!(
+            (raw.lapses, raw.unknown_streak, raw.needs_attention),
+            (0, 0, false)
+        );
     }
 
     #[test]

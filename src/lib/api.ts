@@ -10,6 +10,18 @@ export interface CardDto {
   dueAt: string;
   needsAttention: boolean;
   level: number;
+  lapses: number;
+}
+
+export interface Stats {
+  todayReviewed: number;
+  dueCount: number;
+  totalCards: number;
+  streakDays: number;
+  levelDistribution: number[];
+  last7Days: number[];
+  attentionCount: number;
+  archivedCount: number;
 }
 
 export interface ImportFile {
@@ -70,6 +82,11 @@ export const api = {
   previewIntervals: (cardId: number) =>
     invoke<number[]>("preview_intervals", { cardId }),  markShown: (cardId: number) => invoke<void>("mark_card_shown", { cardId }),
   dueCount: () => invoke<number>("due_count"),
+  getStats: () => invoke<Stats>("get_stats"),
+  listAttentionCards: () => invoke<CardDto[]>("list_attention_cards"),
+  clearAttention: (cardId: number) => invoke<CardDto>("clear_attention", { cardId }),
+  resetCardProgress: (cardId: number) => invoke<CardDto>("reset_card_progress", { cardId }),
+  restoreCard: (cardId: number) => invoke<CardDto>("restore_card", { cardId }),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>
     invoke<void>("set_settings", { map }),
