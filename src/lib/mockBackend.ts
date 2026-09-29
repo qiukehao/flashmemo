@@ -76,6 +76,41 @@ const settings: MockSettings = {
 let nextId = 100;
 let pendingSession: number[] | null = null;
 const SESSION_KEY = "mockPendingSession";
+const STORE_KEY = "flashmemo-mock-v1";
+
+interface MockStore {
+  cards: CardDto[];
+  settings: MockSettings;
+  nextId: number;
+}
+
+/** Data survives reloads (and the popup-view navigation) via localStorage. */
+function loadStore(): MockStore | null {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    return raw ? (JSON.parse(raw) as MockStore) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStore(): void {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ cards, settings, nextId }));
+  } catch {
+    /* quota/private mode: mock data just won't persist */
+  }
+}
+
+// Restore a previous session (imported notes, edits, settings) if present.
+{
+  const saved = loadStore();
+  if (saved?.cards?.length) {
+    cards.splice(0, cards.length, ...saved.cards);
+    Object.assign(settings, saved.settings ?? {});
+    nextId = saved.nextId ?? cards.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+  }
+}
 
 // A browser has no second window: `start_review` navigates the current tab to
 // the popup view, and the selection survives the reload via sessionStorage.
@@ -89,6 +124,20 @@ try {
   /* sessionStorage unavailable: fine, selection is simply not carried over */
 }
 
+/** Commands that change data and therefore trigger a localStorage write. */
+const MUTATING = new Set([
+  "import_markdown",
+  "add_card",
+  "delete_card",
+  "delete_deck",
+  "rename_deck",
+  "update_card",
+  "save_card_content",
+  "rate_card",
+  "skip_card",
+  "set_settings",
+]);
+
 function clone(c: CardDto): CardDto {
   return { ...c };
 }
@@ -99,179 +148,187 @@ function findCard(id: number): CardDto | undefined {
 
 /** Registers the in-memory command handlers; call once before rendering. */
 export function installMockBackend(): void {
-  console.info("[mock] 浏览器调试模式：Tauri 命令由内存假数据接管");
+  console.info(
+    "[mock] 浏览器调试模式：数据保存在 localStorage，刷新不丢。\n" +
+      "重置示例数据：localStorage.removeItem('flashmemo-mock-v1') 后刷新页面。",
+  );
   mockIPC(async (cmd, args) => {
     const a = (args ?? {}) as Record<string, unknown>;
     await new Promise((r) => setTimeout(r, 80)); // 模拟 IPC 延迟
+    const result = await handleCommand(cmd, a);
+    if (MUTATING.has(cmd)) saveStore();
+    return result;
+  });
+}
 
-    switch (cmd) {
-      case "review_queue": {
-        const batch = pendingSession
-          ? (pendingSession.map(findCard).filter(Boolean) as CardDto[])
-          : cards.slice(0, Number(a.limit ?? a.dueLimit ?? 3));
-        pendingSession = null;
-        return batch.map(clone);
+async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<unknown> {
+  switch (cmd) {
+    case "review_queue": {
+      const batch = pendingSession
+        ? (pendingSession.map(findCard).filter(Boolean) as CardDto[])
+        : cards.slice(0, Number(a.limit ?? a.dueLimit ?? 3));
+      pendingSession = null;
+      return batch.map(clone);
+    }
+    case "due_queue":
+      return cards.slice(0, Number(a.limit ?? 3)).map(clone);
+    case "start_review": {
+      pendingSession = (a.cardIds as number[]) ?? [];
+      // Swap to the popup view in this same tab (Tauri would open a window).
+      try {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(pendingSession));
+      } catch {
+        /* ignore */
       }
-      case "due_queue":
-        return cards.slice(0, Number(a.limit ?? 3)).map(clone);
-      case "start_review": {
-        pendingSession = (a.cardIds as number[]) ?? [];
-        // Swap to the popup view in this same tab (Tauri would open a window).
-        try {
-          sessionStorage.setItem(SESSION_KEY, JSON.stringify(pendingSession));
-        } catch {
-          /* ignore */
-        }
-        window.location.search = "?window=popup";
-        return pendingSession.length;
+      window.location.search = "?window=popup";
+      return pendingSession.length;
+    }
+    case "preview_intervals":
+      return [3, 8, 20];
+    case "rate_card": {
+      const c = findCard(Number(a.cardId));
+      if (c) {
+        c.level = Math.min(5, c.level + 1);
+        c.needsAttention = false;
       }
-      case "preview_intervals":
-        return [3, 8, 20];
-      case "rate_card": {
-        const c = findCard(Number(a.cardId));
-        if (c) {
-          c.level = Math.min(5, c.level + 1);
-          c.needsAttention = false;
-        }
-        return c ? clone(c) : null;
+      return c ? clone(c) : null;
+    }
+    case "skip_card": {
+      const c = findCard(Number(a.cardId));
+      return c ? clone(c) : null;
+    }
+    case "mark_card_shown":
+      return null;
+    case "save_card_content": {
+      const c = findCard(Number(a.cardId));
+      if (c) c.contentMd = String(a.contentMd ?? "");
+      return c ? clone(c) : null;
+    }
+    case "update_card": {
+      const c = findCard(Number(a.cardId));
+      if (c) {
+        c.title = String(a.title ?? c.title);
+        c.contentMd = String(a.contentMd ?? c.contentMd);
       }
-      case "skip_card": {
-        const c = findCard(Number(a.cardId));
-        return c ? clone(c) : null;
+      return c ? clone(c) : null;
+    }
+    case "add_card": {
+      const card: CardDto = {
+        id: nextId++,
+        deck: String(a.deck ?? "未命名"),
+        chapter: String(a.chapter ?? "未分类"),
+        title: String(a.title ?? ""),
+        contentMd: String(a.contentMd ?? ""),
+        state: "new",
+        dueAt: new Date().toISOString(),
+        needsAttention: false,
+        level: 0,
+      };
+      cards.push(card);
+      return clone(card);
+    }
+    case "delete_card": {
+      const i = cards.findIndex((c) => c.id === Number(a.cardId));
+      if (i >= 0) cards.splice(i, 1);
+      return null;
+    }
+    case "delete_deck": {
+      for (let i = cards.length - 1; i >= 0; i--) {
+        if (cards[i].deck === a.name) cards.splice(i, 1);
       }
-      case "mark_card_shown":
-        return null;
-      case "save_card_content": {
-        const c = findCard(Number(a.cardId));
-        if (c) c.contentMd = String(a.contentMd ?? "");
-        return c ? clone(c) : null;
+      return null;
+    }
+    case "rename_deck": {
+      for (const c of cards) {
+        if (c.deck === a.oldName) c.deck = String(a.newName ?? c.deck);
       }
-      case "update_card": {
-        const c = findCard(Number(a.cardId));
-        if (c) {
-          c.title = String(a.title ?? c.title);
-          c.contentMd = String(a.contentMd ?? c.contentMd);
-        }
-        return c ? clone(c) : null;
+      return null;
+    }
+    case "list_cards":
+      return cards.filter((c) => c.deck === a.deck).map(clone);
+    case "list_overview": {
+      const byDeck = new Map<string, { chapters: Set<string>; count: number }>();
+      for (const c of cards) {
+        const entry = byDeck.get(c.deck) ?? { chapters: new Set(), count: 0 };
+        entry.chapters.add(c.chapter);
+        entry.count += 1;
+        byDeck.set(c.deck, entry);
       }
-      case "add_card": {
-        const card: CardDto = {
-          id: nextId++,
-          deck: String(a.deck ?? "未命名"),
-          chapter: String(a.chapter ?? "未分类"),
-          title: String(a.title ?? ""),
-          contentMd: String(a.contentMd ?? ""),
-          state: "new",
-          dueAt: new Date().toISOString(),
-          needsAttention: false,
-          level: 0,
-        };
-        cards.push(card);
-        return clone(card);
-      }
-      case "delete_card": {
-        const i = cards.findIndex((c) => c.id === Number(a.cardId));
-        if (i >= 0) cards.splice(i, 1);
-        return null;
-      }
-      case "delete_deck": {
-        for (let i = cards.length - 1; i >= 0; i--) {
-          if (cards[i].deck === a.name) cards.splice(i, 1);
-        }
-        return null;
-      }
-      case "rename_deck": {
-        for (const c of cards) {
-          if (c.deck === a.oldName) c.deck = String(a.newName ?? c.deck);
-        }
-        return null;
-      }
-      case "list_cards":
-        return cards.filter((c) => c.deck === a.deck).map(clone);
-      case "list_overview": {
-        const byDeck = new Map<string, { chapters: Set<string>; count: number }>();
-        for (const c of cards) {
-          const entry = byDeck.get(c.deck) ?? { chapters: new Set(), count: 0 };
-          entry.chapters.add(c.chapter);
-          entry.count += 1;
-          byDeck.set(c.deck, entry);
-        }
-        return [...byDeck.entries()].map(([name, v]) => ({
-          name,
-          chapterCount: v.chapters.size,
-          cardCount: v.count,
-          dueCount: v.count,
-        }));
-      }
-      case "search_cards": {
-        const q = String(a.query ?? "").toLowerCase();
-        const deck = a.deck ? String(a.deck) : null;
-        const filter = String(a.filter ?? "all");
-        return cards
-          .filter((c) => (deck ? c.deck === deck : true))
-          .filter((c) =>
-            q ? c.title.toLowerCase().includes(q) || c.contentMd.toLowerCase().includes(q) : true,
-          )
-          .filter((c) =>
-            filter === "new" ? c.level === 0 : filter === "review" ? c.level > 0 : true,
-          )
-          .map(clone);
-      }
-      case "import_markdown": {
-        // Real parse (TS mirror of parser.rs) so import flows are testable in
-        // the browser; cards are appended to the in-memory store.
-        const files = (a.files as { name: string; content: string }[]) ?? [];
-        let added = 0;
-        for (const f of files) {
-          const stem = f.name.replace(/\.[^.]+$/, "");
-          for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
-            for (const ch of deck.chapters) {
-              for (const c of ch.cards) {
-                cards.push({
-                  id: nextId++,
-                  deck: deck.name,
-                  chapter: ch.name,
-                  title: c.title,
-                  contentMd: c.contentMd,
-                  state: "new",
-                  dueAt: new Date().toISOString(),
-                  needsAttention: false,
-                  level: 0,
-                });
-                added += 1;
-              }
+      return [...byDeck.entries()].map(([name, v]) => ({
+        name,
+        chapterCount: v.chapters.size,
+        cardCount: v.count,
+        dueCount: v.count,
+      }));
+    }
+    case "search_cards": {
+      const q = String(a.query ?? "").toLowerCase();
+      const deck = a.deck ? String(a.deck) : null;
+      const filter = String(a.filter ?? "all");
+      return cards
+        .filter((c) => (deck ? c.deck === deck : true))
+        .filter((c) =>
+          q ? c.title.toLowerCase().includes(q) || c.contentMd.toLowerCase().includes(q) : true,
+        )
+        .filter((c) =>
+          filter === "new" ? c.level === 0 : filter === "review" ? c.level > 0 : true,
+        )
+        .map(clone);
+    }
+    case "import_markdown": {
+      // Real parse (TS mirror of parser.rs) so import flows are testable in
+      // the browser; cards are appended to the in-memory store.
+      const files = (a.files as { name: string; content: string }[]) ?? [];
+      let added = 0;
+      for (const f of files) {
+        const stem = f.name.replace(/\.[^.]+$/, "");
+        for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
+          for (const ch of deck.chapters) {
+            for (const c of ch.cards) {
+              cards.push({
+                id: nextId++,
+                deck: deck.name,
+                chapter: ch.name,
+                title: c.title,
+                contentMd: c.contentMd,
+                state: "new",
+                dueAt: new Date().toISOString(),
+                needsAttention: false,
+                level: 0,
+              });
+              added += 1;
             }
           }
         }
-        return { added, updated: 0, conflicts: 0, keptMissing: 0 };
       }
-      case "preview_import": {
-        const files = (a.files as { name: string; content: string }[]) ?? [];
-        let decksCount = 0;
-        let chapters = 0;
-        let cardCount = 0;
-        const deckNames: string[] = [];
-        for (const f of files) {
-          const stem = f.name.replace(/\.[^.]+$/, "");
-          for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
-            decksCount += 1;
-            deckNames.push(deck.name);
-            chapters += deck.chapters.length;
-            cardCount += deck.chapters.reduce((n, ch) => n + ch.cards.length, 0);
-          }
-        }
-        return { decks: decksCount, chapters, cards: cardCount, conflicts: 0, deckNames };
-      }
-      case "due_count":
-        return cards.length;
-      case "get_settings":
-        return { ...settings };
-      case "set_settings":
-        Object.assign(settings, (a.map as MockSettings) ?? {});
-        return null;
-      default:
-        console.warn("[mock] 未实现的命令:", cmd, args);
-        return null;
+      return { added, updated: 0, conflicts: 0, keptMissing: 0 };
     }
-  });
+    case "preview_import": {
+      const files = (a.files as { name: string; content: string }[]) ?? [];
+      let decksCount = 0;
+      let chapters = 0;
+      let cardCount = 0;
+      const deckNames: string[] = [];
+      for (const f of files) {
+        const stem = f.name.replace(/\.[^.]+$/, "");
+        for (const deck of nonEmptyDecks(parseMarkdown(f.content, stem))) {
+          decksCount += 1;
+          deckNames.push(deck.name);
+          chapters += deck.chapters.length;
+          cardCount += deck.chapters.reduce((n, ch) => n + ch.cards.length, 0);
+        }
+      }
+      return { decks: decksCount, chapters, cards: cardCount, conflicts: 0, deckNames };
+    }
+    case "due_count":
+      return cards.length;
+    case "get_settings":
+      return { ...settings };
+    case "set_settings":
+      Object.assign(settings, (a.map as MockSettings) ?? {});
+      return null;
+  default:
+    console.warn("[mock] 未实现的命令:", cmd, a);
+    return null;
+  }
 }
