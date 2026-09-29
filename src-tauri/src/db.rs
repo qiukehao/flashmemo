@@ -401,6 +401,15 @@ impl Db {
             })
     }
 
+    /// Consistent single-file snapshot of the live DB (SPEC §14 backups).
+    /// `VACUUM INTO` works while the connection stays open and fails if the
+    /// target file already exists — callers remove/replace first.
+    pub fn backup_to(&self, path: &std::path::Path) -> rusqlite::Result<()> {
+        self.0
+            .execute("VACUUM INTO ?1", [path.to_string_lossy().to_string()])?;
+        Ok(())
+    }
+
     /// 疑难卡（⚠ 需专项理解）: flagged cards, most-forgotten first.
     pub fn attention_cards(&self) -> rusqlite::Result<Vec<Card>> {
         let sql = format!(

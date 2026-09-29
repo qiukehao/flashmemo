@@ -57,6 +57,13 @@ pub fn run() {
                 .join("FlashMemo")
                 .join("data.db");
             let database = db::Db::open(&db_path).map_err(|e| e.to_string())?;
+            // SPEC §14/F18: daily first-launch backup (best effort — a backup
+            // failure must never block startup).
+            if let Err(e) =
+                services::daily_backup(&database, &std::path::Path::new(&appdata).join("FlashMemo"))
+            {
+                eprintln!("[backup] daily backup failed: {e}");
+            }
             app.manage(Mutex::new(database));
             // Manual review selections ("复习选中/复习该包") wait here for the popup.
             app.manage(services::ReviewSession::default());
@@ -133,6 +140,7 @@ pub fn run() {
             commands::clear_attention,
             commands::reset_card_progress,
             commands::restore_card,
+            commands::backup_now,
             commands::get_settings,
             commands::set_settings,
         ])

@@ -73,6 +73,17 @@ const FIELDS: { key: string; label: string; hint?: string; options?: string[] }[
 export default function SettingsPage() {
   const [values, setValues] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
+  const [backupMsg, setBackupMsg] = useState("");
+
+  async function backupNow() {
+    setBackupMsg("");
+    try {
+      const path = await api.backupNow();
+      setBackupMsg(`已备份：${path}`);
+    } catch (e) {
+      setBackupMsg(String(e));
+    }
+  }
 
   useEffect(() => {
     api
@@ -108,7 +119,7 @@ export default function SettingsPage() {
           ) : (
             <input
               value={values[f.key] ?? ""}
-              placeholder={f.hint}
+              placeholder="默认见右侧说明"
               onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
             />
           )}
@@ -120,6 +131,17 @@ export default function SettingsPage() {
           保存设置
         </button>
         {msg && <span className="ok">{msg}</span>}
+      </div>
+
+      <div className="form-row">
+        <label>数据备份</label>
+        <button className="btn" onClick={() => void backupNow()}>
+          立即备份
+        </button>
+        {backupMsg && <span className="ok small">{backupMsg}</span>}
+        <span className="muted small">
+          每日首次启动自动备份，保留最近 7 份 → %APPDATA%\FlashMemo\backups
+        </span>
       </div>
     </section>
   );

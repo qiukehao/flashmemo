@@ -306,11 +306,13 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
       }
       return c ? clone(c) : null;
     }
-    case "restore_card": {
-      const c = findCard(Number(a.cardId));
-      if (c && c.state === "archived") c.state = "review";
-      return c ? clone(c) : null;
-    }
+      case "restore_card": {
+        const c = findCard(Number(a.cardId));
+        if (c && c.state === "archived") c.state = "review";
+        return c ? clone(c) : null;
+      }
+      case "backup_now":
+        return "（浏览器调试模式：数据都在 localStorage，不生成真实备份文件）";
     case "skip_card": {
       const c = findCard(Number(a.cardId));
       return c ? clone(c) : null;

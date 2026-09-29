@@ -511,6 +511,70 @@ fn card_dto(db: &Db, card_id: i64) -> Result<CardDto, String> {
         .ok_or_else(|| "card disappeared".into())
 }
 
+/// Backup file name for a local date: `data-YYYYMMDD.db` (SPEC §14).
+pub fn backup_file_name(date: chrono::NaiveDate) -> String {
+    format!("data-{}.db", date.format("%Y%m%d"))
+}
+
+/// Files to delete so that only the `keep` newest backups remain.
+/// Names sort chronologically (`data-YYYYMMDD.db`), so lexicographic desc wins.
+pub fn backups_to_prune(mut names: Vec<String>, keep: usize) -> Vec<String> {
+    names.sort();
+    names.reverse();
+    names.into_iter().skip(keep).collect()
+}
+
+pub fn backups_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("backups")
+}
+
+fn list_backup_names(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.starts_with("data-") && n.ends_with(".db"))
+        .collect()
+}
+
+fn prune_backups(dir: &std::path::Path) {
+    for old in backups_to_prune(list_backup_names(dir), 7) {
+        let _ = std::fs::remove_file(dir.join(old));
+    }
+}
+
+/// SPEC §14/F18: once per day on first launch, snapshot the DB into
+/// `backups/` and keep the newest 7. Returns the created path (None when a
+/// backup for today already exists or backups are disabled).
+pub fn daily_backup(db: &Db, data_dir: &std::path::Path) -> Result<Option<String>, String> {
+    if get_u32(db, "backup_enabled", 1) == 0 {
+        return Ok(None);
+    }
+    let dir = backups_dir(data_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(backup_file_name(chrono::Local::now().date_naive()));
+    if !path.exists() {
+        db.backup_to(&path).map_err(|e| e.to_string())?;
+    }
+    prune_backups(&dir);
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Manual "立即备份": overwrite today's file and prune (SPEC §14, F18).
+pub fn backup_now(db: &Db, data_dir: &std::path::Path) -> Result<String, String> {
+    let dir = backups_dir(data_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(backup_file_name(chrono::Local::now().date_naive()));
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    db.backup_to(&path).map_err(|e| e.to_string())?;
+    prune_backups(&dir);
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Search + filter for the deck browser (SPEC §15.2 搜索/筛选).
 pub fn search_cards(
     db: &Db,
@@ -1296,6 +1360,50 @@ mod tests {
             (raw.lapses, raw.unknown_streak, raw.needs_attention),
             (0, 0, false)
         );
+    }
+
+    #[test]
+    fn backup_naming_and_pruning() {
+        use chrono::NaiveDate;
+        assert_eq!(
+            backup_file_name(NaiveDate::from_ymd_opt(2026, 9, 29).unwrap()),
+            "data-20260929.db"
+        );
+        let names: Vec<String> = ["data-20260901.db", "data-20260910.db", "data-20260905.db"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            backups_to_prune(names, 2),
+            vec!["data-20260901.db"],
+            "only the oldest beyond the keep window is pruned"
+        );
+    }
+
+    #[test]
+    fn daily_backup_snapshots_a_restorable_db() {
+        let dir =
+            std::env::temp_dir().join(format!("flashmemo-backup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let d = Db::open(&dir.join("data.db")).unwrap();
+        add_card(&d, "D", "C", "备份卡", "内容").unwrap();
+
+        let path = daily_backup(&d, &dir).unwrap().unwrap();
+        assert!(std::path::Path::new(&path).exists());
+        // Same day: second call reuses today's file instead of stacking copies.
+        assert_eq!(daily_backup(&d, &dir).unwrap().unwrap(), path);
+
+        // The snapshot is a valid database containing our card.
+        let snap = Db::open(std::path::Path::new(&path)).unwrap();
+        let count: i64 = snap
+            .0
+            .query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

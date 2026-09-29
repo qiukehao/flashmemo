@@ -190,6 +190,16 @@ pub fn restore_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
     services::restore_card(&lock(&db), card_id)
 }
 
+/// Manual backup (SPEC §14/F18): snapshot the DB and return the file path.
+#[tauri::command]
+pub fn backup_now(db: DbState) -> Result<String, String> {
+    let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
+    services::backup_now(
+        &lock(&db),
+        &std::path::Path::new(&appdata).join("FlashMemo"),
+    )
+}
+
 #[tauri::command]
 pub fn get_settings(db: DbState) -> Result<HashMap<String, String>, String> {
     Ok(services::list_settings(&lock(&db))?.into_iter().collect())

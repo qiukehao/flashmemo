@@ -87,6 +87,7 @@ export const api = {
   clearAttention: (cardId: number) => invoke<CardDto>("clear_attention", { cardId }),
   resetCardProgress: (cardId: number) => invoke<CardDto>("reset_card_progress", { cardId }),
   restoreCard: (cardId: number) => invoke<CardDto>("restore_card", { cardId }),
+  backupNow: () => invoke<string>("backup_now"),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>
     invoke<void>("set_settings", { map }),
