@@ -701,3 +701,73 @@ body {
   align-items: center;
   gap: 8px;
 }
+
+/* ---------- AI sidebar (SPEC §10) ---------- */
+.ai-toggle {
+  margin-top: auto;
+}
+.ai-divider {
+  width: 5px;
+  cursor: col-resize;
+  background: #e5e7eb;
+  flex: none;
+}
+.ai-divider:hover {
+  background: #93c5fd;
+}
+.ai-sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  background: #fff;
+  border-left: 1px solid #e5e7eb;
+  min-width: 320px;
+}
+.ai-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.ai-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.ai-sidebar-head select {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.ai-sidebar-url {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f3f4f6;
+}
+.ai-sidebar-url input {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.ai-webview-slot {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8fafc;
+}
+.ai-mock-hint {
+  text-align: center;
+  line-height: 1.8;
+  padding: 0 16px;
+}
+.ai-sidebar-hint {
+  padding: 6px 10px;
+  border-top: 1px solid #f3f4f6;
+  text-align: center;
+}

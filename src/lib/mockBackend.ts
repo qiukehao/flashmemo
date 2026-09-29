@@ -362,6 +362,19 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
       }
       case "backup_now":
         return "（浏览器调试模式：数据都在 localStorage，不生成真实备份文件）";
+      case "ai_sidebar_open":
+      case "ai_sidebar_resize":
+      case "ai_sidebar_close":
+        return null; // 浏览器调试模式没有原生 Webview，侧栏显示占位说明
+      case "show_main_with_ai":
+        // Browser has a single tab: expand the sidebar and jump to the main
+        // view so the user sees it (mirrors the real app's ai-expand event).
+        settings.ai_sidebar_open = "1";
+        saveStore(); // MUTATING 不含该命令，这里手动落盘保证导航后仍展开
+        if (!location.search.includes("window=main")) {
+          window.location.search = "?window=main";
+        }
+        return null;
       case "get_card_context": {
         const id = Number(a.cardId);
         const card = findCard(id);

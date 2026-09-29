@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod commands;
 pub mod db;
 pub mod engine;
@@ -146,6 +147,10 @@ pub fn run() {
             commands::add_card_link,
             commands::remove_card_link,
             commands::set_deck_chain,
+            ai::ai_sidebar_open,
+            ai::ai_sidebar_resize,
+            ai::ai_sidebar_close,
+            ai::show_main_with_ai,
             commands::get_settings,
             commands::set_settings,
         ])

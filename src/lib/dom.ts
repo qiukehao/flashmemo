@@ -8,3 +8,23 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
   if (!el || typeof el.closest !== "function") return false;
   return Boolean(el.closest('[contenteditable="true"], textarea, input, select'));
 }
+
+/** Copy text to the clipboard, with a legacy fallback (SPEC §10.1 带题). */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}

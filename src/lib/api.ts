@@ -109,6 +109,12 @@ export const api = {
     invoke<void>("remove_card_link", { fromId, toId }),
   setDeckChain: (deck: string, enabled: boolean) =>
     invoke<void>("set_deck_chain", { deck, enabled }),
+  aiSidebarOpen: (url: string, x: number, y: number, w: number, h: number) =>
+    invoke<void>("ai_sidebar_open", { url, x, y, w, h }),
+  aiSidebarResize: (x: number, y: number, w: number, h: number) =>
+    invoke<void>("ai_sidebar_resize", { x, y, w, h }),
+  aiSidebarClose: () => invoke<void>("ai_sidebar_close"),
+  showMainWithAi: () => invoke<void>("show_main_with_ai"),
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSettings: (map: Record<string, string>) =>
     invoke<void>("set_settings", { map }),

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type CardDto, type CardLinks, type DeckOverview } from "../lib/api";
+import { copyText } from "../lib/dom";
 
 const STATE_LABEL: Record<string, string> = {
   suspended: "已删除",
@@ -286,6 +287,12 @@ export default function DecksPage() {
     }
   }
 
+  /** SPEC §10.1: copy the edited card and open the AI sidebar. */
+  async function askAiAboutCard() {
+    await copyText(`${editTitle}\n\n${editContent}`);
+    await api.showMainWithAi().catch(() => {});
+  }
+
   /** SPEC §12.2: archived cards come back with their level intact. */
   async function doRestore(card: CardDto) {
     setError("");
@@ -314,6 +321,9 @@ export default function DecksPage() {
             </button>
             <button className="btn" onClick={() => setEditing(null)}>
               取消
+            </button>
+            <button className="btn" onClick={() => void askAiAboutCard()}>
+              🤖 问 AI
             </button>
           </div>
           {/* 手动前后置关联（SPEC §11.1）：只影响呈现与顺链，不影响调度 */}

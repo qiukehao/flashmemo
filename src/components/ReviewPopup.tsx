@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { api, type CardContext, type CardDto, type RatingName } from "../lib/api";
-import { isTextEntryTarget } from "../lib/dom";
+import { copyText, isTextEntryTarget } from "../lib/dom";
 import { isTauri } from "../lib/env";
 import { formatGap, mapKeyToRating, type RatingAction } from "../lib/format";
 import { renderCard } from "../lib/markdown";
@@ -204,6 +204,21 @@ export default function ReviewPopup() {
     advance();
   }, [advance]);
 
+  /** SPEC §10.1 一键带题: copy the question (optionally + answer), open the
+   *  main window and expand the AI sidebar; the user pastes with Ctrl+V. */
+  const askAi = useCallback(async () => {
+    if (!card) return;
+    let text = card.title;
+    const settings = await api
+      .getSettings()
+      .catch(() => ({}) as Record<string, string>);
+    if (revealed && (settings.ai_attach_back ?? "0") !== "0") {
+      text += `\n\n${card.contentMd}`;
+    }
+    await copyText(text);
+    await api.showMainWithAi().catch(() => {});
+  }, [card, revealed]);
+
   const act = useCallback(
     (action: RatingAction) => {
       if (loading || pendingNext) return;
@@ -266,6 +281,13 @@ export default function ReviewPopup() {
           {card.deck} · {card.chapter}
           {card.needsAttention && " ⚠ 需专项理解"}
         </span>
+        <button
+          className="popup-icon-btn"
+          onClick={() => void askAi()}
+          title="复制问题并打开 AI 侧栏（Ctrl+V 提问）"
+        >
+          🤖
+        </button>
         <button className="popup-close" onClick={() => void closeAll()} title="关闭并跳过剩余">
           ✕
         </button>
