@@ -75,6 +75,7 @@ const settings: MockSettings = {
   study_end: "22:30",
   hint_shown_count: "3",
   notify_mode: "popup",
+  daily_popup_limit: "120",
 };
 
 let nextId = 100;

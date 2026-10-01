@@ -64,6 +64,11 @@ const FIELDS: { key: string; label: string; hint?: string; options?: string[] }[
   { key: "session_new_limit", label: "每次弹窗新卡上限", hint: "默认 1" },
   { key: "skip_delay_min", label: "跳过重入队延迟（分钟）", hint: "10 ~ 120" },
   {
+    key: "daily_popup_limit",
+    label: "每日弹窗上限",
+    hint: "默认 120；0 = 不限。超过后当天只保留轻提醒（系统通知）",
+  },
+  {
     key: "ai_attach_back",
     label: "「问 AI」附带答案",
     hint: "0 = 只复制问题；1 = 同时复制答案（仅在揭示答案后生效）",

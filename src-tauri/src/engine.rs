@@ -18,6 +18,8 @@ pub struct EngineSettings {
     pub study_end: String,
     pub paused_until: Option<DateTime<Utc>>,
     pub notify_mode: String,
+    /// SPEC §7.8 每日弹窗上限; 0 = unlimited.
+    pub daily_popup_limit: u32,
 }
 
 impl Default for EngineSettings {
@@ -28,6 +30,7 @@ impl Default for EngineSettings {
             study_end: "22:30".into(),
             paused_until: None,
             notify_mode: "popup".into(),
+            daily_popup_limit: 120,
         }
     }
 }
@@ -71,21 +74,31 @@ pub fn interval_elapsed(last_popup_at: Option<DateTime<Utc>>, interval_min: u32)
     last_popup_at.is_none_or(|t| Utc::now() - t >= chrono::Duration::minutes(interval_min as i64))
 }
 
+/// SPEC §7.8 过载保护: the first gate is the per-popup quota (§7.4), the second
+/// is the popup interval, this is the third — at most `limit` popup sessions
+/// per local day (0 = 关). Beyond the cap the app degrades to light reminders.
+pub fn daily_limit_reached(today_popups: i64, limit: u32) -> bool {
+    limit > 0 && today_popups >= limit as i64
+}
+
 /// SPEC §8.2: pop only when cards are due, within hours, unpaused, no popup
-/// already open, and the popup interval has elapsed since the last session.
+/// already open, the popup interval has elapsed since the last session, and
+/// the daily cap (§7.8) is not reached. Manual triggers (`force`) are explicit
+/// user intent and bypass both throttles.
 pub fn popup_decision(
     due_count: usize,
     now: DateTime<Local>,
     s: &EngineSettings,
     popup_open: bool,
     last_popup_at: Option<DateTime<Utc>>,
+    overloaded: bool,
     force: bool,
 ) -> bool {
     due_count > 0
         && !popup_open
         && in_study_hours(now, s)
         && not_paused(s)
-        && (force || interval_elapsed(last_popup_at, s.interval_min))
+        && (force || (!overloaded && interval_elapsed(last_popup_at, s.interval_min)))
 }
 
 /// Center of the monitor work area, in **logical pixels** (2026-09-28 调整：
@@ -109,6 +122,9 @@ fn read_settings(db: &Db) -> EngineSettings {
         study_end: get("study_end").unwrap_or_else(|| "22:30".into()),
         paused_until: get("paused_until").map(|v| db::parse_time(&v)),
         notify_mode: get("notify_mode").unwrap_or_else(|| "popup".into()),
+        daily_popup_limit: get("daily_popup_limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120),
     }
 }
 
@@ -119,28 +135,24 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>, force: bool) -> 
     let Some(db_cell) = app.try_state::<Mutex<Db>>() else {
         return false;
     };
-    let (settings, due, popup_open) = {
+    let now_local = Local::now();
+    let (settings, due, popup_open, today_popups) = {
         let db = db_cell.lock().expect("db mutex poisoned");
         (
             read_settings(&db),
             services::due_count(&db).unwrap_or(0) as usize,
             app.get_webview_window("popup").is_some(),
+            db.popup_count_on(&now_local.format("%Y-%m-%d").to_string())
+                .unwrap_or(0),
         )
     };
-    let now_local = Local::now();
+    let overloaded = daily_limit_reached(today_popups, settings.daily_popup_limit);
     let mut st = state.lock().expect("engine state poisoned");
     if settings.notify_mode == "notify" {
         if due == 0 || !not_paused(&settings) || !in_study_hours(now_local, &settings) {
             return false;
         }
-        // Light notification (SPEC §8.1); throttled to one per popup interval.
-        let due_notify = st.last_notify.is_none_or(|t| {
-            Utc::now() - t >= chrono::Duration::minutes(settings.interval_min as i64)
-        });
-        if due_notify && app.get_webview_window("popup").is_none() {
-            st.last_notify = Some(Utc::now());
-            show_notification(app, due);
-        }
+        maybe_notify(app, due, settings.interval_min, false, &mut st);
         return false;
     }
     if !popup_decision(
@@ -149,8 +161,20 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>, force: bool) -> 
         &settings,
         popup_open,
         st.last_popup_at,
+        overloaded,
         force,
     ) {
+        // SPEC §7.8: once the daily cap is reached, popups stop but light
+        // reminders remain (same throttle as 仅轻提醒 mode).
+        if overloaded
+            && !force
+            && !popup_open
+            && due > 0
+            && not_paused(&settings)
+            && in_study_hours(now_local, &settings)
+        {
+            maybe_notify(app, due, settings.interval_min, true, &mut st);
+        }
         return false;
     }
     let (mx, my, mw, mh) = cursor_monitor_logical(app);
@@ -162,6 +186,7 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>, force: bool) -> 
     );
     match open_popup(app, pos) {
         Ok(_window) => {
+            record_popup(app);
             st.last_popup_at = Some(Utc::now());
             true
         }
@@ -169,15 +194,47 @@ pub fn tick(app: &tauri::AppHandle, state: &Mutex<EngineState>, force: bool) -> 
     }
 }
 
-fn show_notification(app: &tauri::AppHandle, due: usize) {
+/// Light notification (SPEC §8.1), throttled to one per popup interval.
+/// `capped` marks the §7.8 case: the daily popup cap is reached, so only the
+/// reminder remains.
+fn maybe_notify(
+    app: &tauri::AppHandle,
+    due: usize,
+    interval_min: u32,
+    capped: bool,
+    st: &mut EngineState,
+) {
+    let due_notify = st
+        .last_notify
+        .is_none_or(|t| Utc::now() - t >= chrono::Duration::minutes(interval_min as i64));
+    if due_notify && app.get_webview_window("popup").is_none() {
+        st.last_notify = Some(Utc::now());
+        show_notification(app, due, capped);
+    }
+}
+
+/// Record a popup session for the daily cap (SPEC §7.8), best effort — a
+/// logging failure must never interfere with the popup itself.
+fn record_popup(app: &tauri::AppHandle) {
+    if let Some(cell) = app.try_state::<Mutex<Db>>() {
+        if let Ok(db) = cell.lock() {
+            let _ = db.insert_popup_log(Utc::now());
+        }
+    }
+}
+
+fn show_notification(app: &tauri::AppHandle, due: usize, capped: bool) {
     use tauri_plugin_notification::NotificationExt;
+    let body = if capped {
+        format!("⏰ 有 {due} 张卡片待复习（今日弹窗已达上限，通过托盘菜单「立即复习」打开）")
+    } else {
+        format!("⏰ 有 {due} 张卡片待复习，通过托盘菜单「立即复习」打开")
+    };
     let _ = app
         .notification()
         .builder()
         .title("闪记 FlashMemo")
-        .body(format!(
-            "⏰ 有 {due} 张卡片待复习，通过托盘菜单「立即复习」打开"
-        ))
+        .body(body)
         .show();
 }
 
@@ -232,7 +289,11 @@ pub fn open_review_popup(app: &tauri::AppHandle) -> bool {
     }
     let (mx, my, mw, mh) = cursor_monitor_logical(app);
     let pos = popup_position((mx, my, mw, mh), POPUP_SIZE);
-    open_popup(app, pos).is_ok()
+    let ok = open_popup(app, pos).is_ok();
+    if ok {
+        record_popup(app);
+    }
+    ok
 }
 
 /// Background loop; also re-evaluated immediately on `force-review` events.
@@ -284,20 +345,36 @@ mod tests {
     fn popup_decision_suppressed() {
         let s = settings();
         // Nothing due.
-        assert!(!popup_decision(0, at(10, 0), &s, false, None, false));
+        assert!(!popup_decision(0, at(10, 0), &s, false, None, false, false));
         // Outside study hours.
-        assert!(!popup_decision(5, at(7, 0), &s, false, None, false));
+        assert!(!popup_decision(5, at(7, 0), &s, false, None, false, false));
         // Paused.
         let mut paused = settings();
         paused.paused_until = Some(Utc::now() + chrono::Duration::hours(1));
-        assert!(!popup_decision(5, at(10, 0), &paused, false, None, false));
+        assert!(!popup_decision(
+            5,
+            at(10, 0),
+            &paused,
+            false,
+            None,
+            false,
+            false
+        ));
         // Popup already open.
-        assert!(!popup_decision(5, at(10, 0), &s, true, None, false));
+        assert!(!popup_decision(5, at(10, 0), &s, true, None, false, false));
         // All clear.
-        assert!(popup_decision(5, at(10, 0), &s, false, None, false));
+        assert!(popup_decision(5, at(10, 0), &s, false, None, false, false));
         // Pause expired.
         paused.paused_until = Some(Utc::now() - chrono::Duration::hours(1));
-        assert!(popup_decision(5, at(10, 0), &paused, false, None, false));
+        assert!(popup_decision(
+            5,
+            at(10, 0),
+            &paused,
+            false,
+            None,
+            false,
+            false
+        ));
     }
 
     #[test]
@@ -306,20 +383,56 @@ mod tests {
         let s = settings();
         let recent = Some(Utc::now() - chrono::Duration::minutes(2));
         assert!(
-            !popup_decision(5, at(10, 0), &s, false, recent, false),
+            !popup_decision(5, at(10, 0), &s, false, recent, false, false),
             "a 1-minute-due learning card must wait for the 10-minute popup interval"
         );
         let old = Some(Utc::now() - chrono::Duration::minutes(11));
-        assert!(popup_decision(5, at(10, 0), &s, false, old, false));
+        assert!(popup_decision(5, at(10, 0), &s, false, old, false, false));
         // Manual triggers bypass the throttle.
-        assert!(popup_decision(5, at(10, 0), &s, false, recent, true));
+        assert!(popup_decision(5, at(10, 0), &s, false, recent, false, true));
         // User-configured 5-minute interval.
         let mut custom = settings();
         custom.interval_min = 5;
         let four = Some(Utc::now() - chrono::Duration::minutes(4));
-        assert!(!popup_decision(5, at(10, 0), &custom, false, four, false));
+        assert!(!popup_decision(
+            5,
+            at(10, 0),
+            &custom,
+            false,
+            four,
+            false,
+            false
+        ));
         let six = Some(Utc::now() - chrono::Duration::minutes(6));
-        assert!(popup_decision(5, at(10, 0), &custom, false, six, false));
+        assert!(popup_decision(
+            5,
+            at(10, 0),
+            &custom,
+            false,
+            six,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn daily_limit_reached_respects_zero_as_unlimited() {
+        assert!(!daily_limit_reached(119, 120));
+        assert!(daily_limit_reached(120, 120));
+        assert!(daily_limit_reached(121, 120));
+        assert!(!daily_limit_reached(9_999, 0), "0 = 关掉上限");
+    }
+
+    #[test]
+    fn daily_cap_suppresses_popup_but_manual_force_bypasses() {
+        let s = settings();
+        let old = Some(Utc::now() - chrono::Duration::hours(1));
+        // Cap reached: no popup even with everything else clear.
+        assert!(!popup_decision(5, at(10, 0), &s, false, old, true, false));
+        // Manual 「立即复习」 is explicit user intent — it still opens.
+        assert!(popup_decision(5, at(10, 0), &s, false, old, true, true));
+        // Under the cap nothing changes.
+        assert!(popup_decision(5, at(10, 0), &s, false, old, false, false));
     }
 
     #[test]

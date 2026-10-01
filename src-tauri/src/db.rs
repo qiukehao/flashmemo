@@ -171,6 +171,16 @@ UPDATE card SET due_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  WHERE state NOT IN ('suspended', 'archived');
 "#;
 
+/// v4 (2026-10-01): overload protection (SPEC §7.8) — one row per popup
+/// session that actually opened, so the daily popup cap survives restarts.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE popup_log (
+  id INTEGER PRIMARY KEY,
+  opened_at TEXT NOT NULL
+);
+CREATE INDEX idx_popup_log_opened ON popup_log(opened_at);
+"#;
+
 impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Db> {
         if let Some(parent) = path.parent() {
@@ -205,6 +215,11 @@ impl Db {
         if version < 3 {
             conn.execute_batch(SCHEMA_V3)?;
             conn.pragma_update(None, "user_version", 3)?;
+        }
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 4 {
+            conn.execute_batch(SCHEMA_V4)?;
+            conn.pragma_update(None, "user_version", 4)?;
         }
         Ok(())
     }
@@ -663,6 +678,26 @@ impl Db {
         Ok(())
     }
 
+    // ---- overload protection (SPEC §7.8) ----
+
+    /// One popup session that actually opened, for the daily popup cap.
+    pub fn insert_popup_log(&self, at: DateTime<Utc>) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO popup_log(opened_at) VALUES(?1)",
+            [fmt_time(at)],
+        )?;
+        Ok(())
+    }
+
+    /// Popup sessions opened on one *local* calendar day (`YYYY-MM-DD`).
+    pub fn popup_count_on(&self, local_day: &str) -> rusqlite::Result<i64> {
+        self.0.query_row(
+            "SELECT COUNT(*) FROM popup_log WHERE date(opened_at, 'localtime') = ?1",
+            [local_day],
+            |r| r.get(0),
+        )
+    }
+
     pub fn find_card_in_chapter(
         &self,
         chapter_id: i64,
@@ -866,6 +901,7 @@ mod tests {
             "card_link",
             "chapter",
             "deck",
+            "popup_log",
             "review_log",
             "settings",
         ] {
@@ -894,6 +930,25 @@ mod tests {
             d.get_setting("popup_interval_min").unwrap().as_deref(),
             Some("15")
         );
+    }
+
+    #[test]
+    fn popup_log_counts_per_local_day() {
+        let d = db();
+        let today = chrono::Local::now().date_naive();
+        let day = |offset: i64| {
+            (today - chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        assert_eq!(d.popup_count_on(&day(0)).unwrap(), 0);
+        d.insert_popup_log(Utc::now()).unwrap();
+        d.insert_popup_log(Utc::now()).unwrap();
+        // A popup from yesterday's local evening must not count towards today.
+        let yesterday = Utc::now() - chrono::Duration::hours(24);
+        d.insert_popup_log(yesterday).unwrap();
+        assert_eq!(d.popup_count_on(&day(0)).unwrap(), 2);
+        assert_eq!(d.popup_count_on(&day(1)).unwrap(), 1);
     }
 
     #[test]
