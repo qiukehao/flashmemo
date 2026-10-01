@@ -173,12 +173,14 @@ UPDATE card SET due_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 
 /// v4 (2026-10-01): overload protection (SPEC §7.8) — one row per popup
 /// session that actually opened, so the daily popup cap survives restarts.
+/// `IF NOT EXISTS` keeps the step idempotent if a previous run died between
+/// the batch and the version bump.
 const SCHEMA_V4: &str = r#"
-CREATE TABLE popup_log (
+CREATE TABLE IF NOT EXISTS popup_log (
   id INTEGER PRIMARY KEY,
   opened_at TEXT NOT NULL
 );
-CREATE INDEX idx_popup_log_opened ON popup_log(opened_at);
+CREATE INDEX IF NOT EXISTS idx_popup_log_opened ON popup_log(opened_at);
 "#;
 
 impl Db {
