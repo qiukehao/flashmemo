@@ -87,6 +87,9 @@ export const api = {
     invoke<CardDto>("save_card_content", { cardId, contentMd }),
   searchCards: (query: string | null, deck: string | null, filter: string) =>
     invoke<CardDto[]>("search_cards", { query, deck, filter }),
+  getCard: (cardId: number) => invoke<CardDto>("get_card", { cardId }),
+  /** Popup 知识铺垫 → 主窗口编辑器 (SPEC §11.2); the popup yields meanwhile. */
+  editCardInMain: (cardId: number) => invoke<void>("edit_card_in_main", { cardId }),
   startReview: (cardIds: number[]) => invoke<number>("start_review", { cardIds }),
   reviewQueue: () => invoke<CardDto[]>("review_queue"),
   dueQueue: (limit: number) => invoke<CardDto[]>("due_queue", { limit }),

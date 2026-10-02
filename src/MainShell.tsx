@@ -26,6 +26,8 @@ export default function MainShell() {
   const [tab, setTab] = useState<TabKey>("home");
   // Data-changing actions elsewhere bump this so pages reload on visit.
   const [bump, setBump] = useState(0);
+  // Card to auto-open in the deck editor (jump-to-edit from the popup, §11.2).
+  const [pendingEditCard, setPendingEditCard] = useState<number | null>(null);
   // AI sidebar (SPEC §10): open state + width are remembered across launches.
   const [aiOpen, setAiOpen] = useState(false);
   const [aiWidth, setAiWidth] = useState(420);
@@ -61,6 +63,39 @@ export default function MainShell() {
       })
       .catch(() => {});
     return () => unlisten?.();
+  }, []);
+
+  // Jump-to-edit from the popup's 知识铺垫 (§11.2): open the deck editor.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<number>("edit-card", (e) => {
+          setTab("decks");
+          setBump((k) => k + 1);
+          setPendingEditCard(e.payload);
+        }),
+      )
+      .then((un) => {
+        unlisten = un;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
+
+  // Browser mock has no cross-window events: the mock `edit_card_in_main`
+  // hands the card id over via sessionStorage before switching views.
+  useEffect(() => {
+    if (isTauri()) return;
+    const raw = sessionStorage.getItem("mockEditCardId");
+    if (raw === null) return;
+    sessionStorage.removeItem("mockEditCardId");
+    const id = Number.parseInt(raw, 10);
+    if (Number.isFinite(id)) {
+      setTab("decks");
+      setPendingEditCard(id);
+    }
   }, []);
 
   useEffect(() => {
@@ -119,7 +154,13 @@ export default function MainShell() {
       </nav>
       <main className="shell-main">
         {tab === "home" && <HomePage key={bump} onNavigate={navigate} />}
-        {tab === "decks" && <DecksPage key={bump} />}
+        {tab === "decks" && (
+          <DecksPage
+            key={bump}
+            openCardId={pendingEditCard}
+            onCardOpened={() => setPendingEditCard(null)}
+          />
+        )}
         {tab === "leeches" && <LeechesPage key={bump} />}
         {tab === "import" && <ImportPage key={bump} onDone={navigate} />}
         {tab === "add" && <AddCardPage key={bump} onSaved={navigate} />}

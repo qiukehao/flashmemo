@@ -799,6 +799,14 @@ pub fn cards_by_ids(db: &Db, ids: &[i64]) -> Result<Vec<CardDto>, String> {
         .collect())
 }
 
+/// One card by id — the "jump to editor" path from the popup's 知识铺垫.
+pub fn card(db: &Db, card_id: i64) -> Result<CardDto, String> {
+    db.get_card(card_id)
+        .map_err(|e| e.to_string())?
+        .map(|c| to_dto(&c))
+        .ok_or_else(|| "卡片不存在".into())
+}
+
 /// Explicit-card review session: the popup consumes the pending id list once
 /// (set by "复习选中/复习该包"), otherwise falls back to the due queue.
 pub type ReviewSession = std::sync::Mutex<Option<Vec<i64>>>;
@@ -988,6 +996,14 @@ mod tests {
     fn add_card_rejects_blank_title() {
         let d = db();
         assert!(add_card(&d, "D", "C", "  ", "x").is_err());
+    }
+
+    #[test]
+    fn card_by_id_returns_dto_or_error() {
+        let d = db();
+        let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
+        assert_eq!(card(&d, dto.id).unwrap().title, "ACID?");
+        assert_eq!(card(&d, 4_096).unwrap_err(), "卡片不存在");
     }
 
     #[test]

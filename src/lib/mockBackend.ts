@@ -376,6 +376,20 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
           window.location.search = "?window=main";
         }
         return null;
+      case "edit_card_in_main": {
+        // Mirror of the real jump-to-edit (§11.2): hand the card id to the
+        // main view via sessionStorage, then switch views. The mock has no
+        // second window, so there is no popup to hide/restore.
+        sessionStorage.setItem("mockEditCardId", String(Number(a.cardId)));
+        if (!location.search.includes("window=main")) {
+          window.location.search = "?window=main";
+        }
+        return null;
+      }
+      case "get_card": {
+        const c = findCard(Number(a.cardId));
+        return c ? clone(c) : null;
+      }
       case "get_card_context": {
         const id = Number(a.cardId);
         const card = findCard(id);

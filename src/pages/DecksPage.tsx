@@ -46,7 +46,14 @@ function fmtDue(iso: string): string {
 }
 
 /** Deck management + search/filter + manual review selection (SPEC §15.2). */
-export default function DecksPage() {
+export default function DecksPage({
+  openCardId = null,
+  onCardOpened,
+}: {
+  /** Jump-to-edit target (§11.2): auto-open this card's editor on mount. */
+  openCardId?: number | null;
+  onCardOpened?: () => void;
+} = {}) {
   const [overview, setOverview] = useState<DeckOverview[]>([]);
   const [openDeck, setOpenDeck] = useState<string | null>(null);
   const [cards, setCards] = useState<CardDto[]>([]);
@@ -220,6 +227,35 @@ export default function DecksPage() {
       .then(setLinks)
       .catch(() => {});
   }
+
+  // Jump-to-edit (§11.2): expand the card's deck and open its editor once.
+  useEffect(() => {
+    if (openCardId == null) return;
+    let cancelled = false;
+    api
+      .getCard(openCardId)
+      .then(async (card) => {
+        if (cancelled) return;
+        if (!card) {
+          setError("卡片不存在");
+          onCardOpened?.();
+          return;
+        }
+        setOpenDeck(card.deck);
+        setCards(await api.listCards(card.deck));
+        startEdit(card);
+        onCardOpened?.();
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // onCardOpened is stable enough for this one-shot effect; including it
+    // would re-fire on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCardId]);
 
   // Debounced card search for the link picker (within the edited card's deck).
   useEffect(() => {

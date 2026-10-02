@@ -303,7 +303,17 @@ export default function ReviewPopup() {
             </summary>
             {context.requires.map((r) => (
               <div className="popup-context-card" key={r.id}>
-                <div className="popup-context-title">{r.title}</div>
+                {/* SPEC §11.2: the title jumps to the main-window editor —
+                    the popup yields and resumes when main closes. */}
+                <button
+                  type="button"
+                  className="popup-context-title"
+                  title="到主窗口编辑这张前置卡"
+                  onClick={() => void api.editCardInMain(r.id).catch(() => {})}
+                >
+                  <span>{r.title}</span>
+                  <span className="popup-context-edit-hint">✏️</span>
+                </button>
                 <div
                   className="popup-back"
                   // markdown-it escapes raw HTML (html:false) before this injection.

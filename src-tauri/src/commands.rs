@@ -71,6 +71,28 @@ pub fn search_cards(
 }
 
 #[tauri::command]
+pub fn get_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
+    services::card(&lock(&db), card_id)
+}
+
+/// Jump-to-editor from the popup's 知识铺垫 (SPEC §11.2): focus the main window
+/// and tell it which card to open, while the popup yields (hides) so the
+/// editor is unobstructed. The main window's close handler restores the popup.
+#[tauri::command]
+pub fn edit_card_in_main(card_id: i64, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+    if let Some(popup) = app.get_webview_window("popup") {
+        let _ = popup.hide();
+    }
+    app.emit("edit-card", card_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn import_markdown(
     files: Vec<ImportFile>,
     prefer_file: bool,

@@ -113,6 +113,14 @@ pub fn run() {
                 if window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
+                    // A popup hidden by jump-to-edit (§11.2) resumes once the
+                    // user is done with the main window.
+                    if let Some(popup) = window.app_handle().get_webview_window("popup") {
+                        if !popup.is_visible().unwrap_or(true) {
+                            let _ = popup.show();
+                            let _ = popup.set_focus();
+                        }
+                    }
                 }
             }
         })
@@ -128,6 +136,8 @@ pub fn run() {
             commands::update_card,
             commands::save_card_content,
             commands::search_cards,
+            commands::get_card,
+            commands::edit_card_in_main,
             commands::start_review,
             commands::review_queue,
             commands::due_queue,

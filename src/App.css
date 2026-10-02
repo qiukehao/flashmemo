@@ -641,10 +641,32 @@ body {
   margin-top: 8px;
 }
 .popup-context-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  font: inherit;
   font-weight: 600;
   font-size: 13px;
   color: #334155;
   margin-bottom: 2px;
+  cursor: pointer;
+}
+.popup-context-title:hover {
+  color: #b45309;
+  text-decoration: underline;
+}
+.popup-context-edit-hint {
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.popup-context-title:hover .popup-context-edit-hint {
+  opacity: 1;
 }
 .popup-continue {
   display: flex;
