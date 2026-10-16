@@ -6,3 +6,18 @@ src-tauri/gen/schemas/
 *.db-journal
 .DS_Store
 *.local
+
+# 本地/内部文件：不随仓库分发
+.zcode/
+.agent-teams/
+src-tauri/.cdp-min.mjs
+
+# 本地环境变量（本项目零网络，正常情况下不存在）
+.env
+.env.local
+
+# 学习素材：来源文档带版权声明（仅限购买者本人使用），只留在本地，不入库
+kabao/
+
+# 本地调试日志
+*.log
