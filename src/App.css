@@ -244,6 +244,24 @@ body {
   font-family: inherit;
 }
 
+/* 粘贴导入（SPEC §5.5）：等宽 + 可拉高，长粘贴里 `#`/`###` 的层级一眼看得出来。 */
+.form-row textarea.paste-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 200px;
+  resize: vertical;
+}
+.paste-samples {
+  margin: 6px 0 0;
+  padding-left: 22px;
+  max-height: 160px;
+  overflow: auto;
+}
+.paste-samples li {
+  margin: 2px 0;
+}
+
 .preview-pane {
   background: #fff;
   border: 1px solid #e5e7eb;

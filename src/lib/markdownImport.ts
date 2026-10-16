@@ -220,6 +220,34 @@ export function parseMarkdown(src: string, fallbackDeck: string): ParsedDeck[] {
   return decks;
 }
 
+/**
+ * 文本里是否出现过第 `level` 级 ATX 标题（围栏代码块里的 `#` 不算，与解析器
+ * 同一套判定）。粘贴导入用它判断"这段文本自带卡包标题吗"（SPEC §5.5）。
+ */
+export function hasHeading(src: string, level: number): boolean {
+  const text = src.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  let fence: [string, number] | null = null;
+  for (const line of text.split("\n")) {
+    const f = fenceRun(line);
+    if (f) {
+      if (!fence) {
+        fence = f;
+      } else if (
+        f[0] === fence[0] &&
+        f[1] >= fence[1] &&
+        line.trim().replace(new RegExp(`^\\${f[0]}+$`), "") === ""
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fence) continue;
+    const h = headingLevel(line);
+    if (h && h[0] === level) return true;
+  }
+  return false;
+}
+
 /** Decks that actually contain cards (stray empty H1 headings are dropped). */
 export function nonEmptyDecks(decks: ParsedDeck[]): ParsedDeck[] {
   return decks

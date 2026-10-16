@@ -74,6 +74,10 @@ export default function AddCardPage({
         ← 返回首页
       </button>
       <h1>添加卡片</h1>
+      <p className="muted">
+        要一次加多张？去「导入」页的<span className="muted">「粘贴文本」</span>
+        把复制来的一整段笔记贴进去（SPEC §5.5）。
+      </p>
       <div className="form-row">
         <label>卡包</label>
         <select value={deckSel} onChange={(e) => setDeckSel(e.target.value)}>
