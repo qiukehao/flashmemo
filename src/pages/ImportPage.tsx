@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { TabKey } from "../lib/tabs";
+import { isTauri } from "../lib/env";
 import {
   api,
   type ImportFile,
@@ -17,9 +19,13 @@ function readText(file: File): Promise<ImportFile> {
   });
 }
 
+const MD_FILTERS = [{ name: "Markdown", extensions: ["md", "markdown"] }];
+
 export default function ImportPage({
+  onBack,
   onDone,
 }: {
+  onBack: () => void;
   onDone: (tab: TabKey) => void;
 }) {
   const [files, setFiles] = useState<ImportFile[]>([]);
@@ -28,25 +34,46 @@ export default function ImportPage({
   const [preferFile, setPreferFile] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  async function choose(fileList: FileList | null) {
+  /** SPEC §5.3: the native picker hands us paths, so the import can also copy
+   *  the images the note references (SPEC §5.4). */
+  async function chooseNative() {
     setError("");
-    setReport(null);
-    setPreview(null);
-    const md = Array.from(fileList ?? []).filter(
+    const picked = await open({ multiple: true, directory: false, filters: MD_FILTERS });
+    const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (paths.length === 0) return;
+    await load(() => api.readMarkdownFiles(paths));
+  }
+
+  /** Browser debug mode: no filesystem, so read the picked files in JS. */
+  async function chooseBrowser(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+    const md = Array.from(fileList).filter(
       (f) => f.name.toLowerCase().endsWith(".md") || f.name.toLowerCase().endsWith(".markdown"),
     );
     if (md.length === 0) {
       setError("请选择 .md 文件");
       return;
     }
+    await load(() => Promise.all(md.map(readText)));
+  }
+
+  async function load(read: () => Promise<ImportFile[]>) {
+    setError("");
+    setReport(null);
+    setPreview(null);
     try {
-      const parsed = await Promise.all(md.map(readText));
+      const parsed = await read();
       setFiles(parsed);
       setPreview(await api.previewImport(parsed));
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  async function choose(fileList: FileList | null) {
+    await chooseBrowser(fileList);
   }
 
   async function confirm() {
@@ -65,16 +92,35 @@ export default function ImportPage({
 
   return (
     <section className="page">
+      <button className="page-back btn" onClick={onBack}>
+        ← 返回首页
+      </button>
       <h1>导入</h1>
       <p className="muted">
         规则：`#` 卡包 · `##` 章节 · `###` 卡片问题，其后内容为答案（SPEC §5）。
+        <br />
+        文档里引用的本地图片会被复制到 FlashMemo 附件目录，卡面用 `attachment:` 引用（SPEC §5.4）。
       </p>
-      <input
-        type="file"
-        multiple
-        accept=".md,.markdown,text/markdown"
-        onChange={(e) => void choose(e.target.files)}
-      />
+      <div className="form-row">
+        <button
+          className="btn primary"
+          onClick={() =>
+            void (isTauri()
+              ? chooseNative()
+              : inputRef.current?.click())
+          }
+        >
+          选择 Markdown 文件…
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          hidden
+          accept=".md,.markdown,text/markdown"
+          onChange={(e) => void choose(e.target.files)}
+        />
+      </div>
       {preview && (
         <div className="card-block">
           <h2>解析预览</h2>

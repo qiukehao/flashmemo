@@ -4,12 +4,16 @@
   "description": "Capability for the main window",
   "windows": [
     "main",
-    "popup"
+    "popup",
+    "ai"
   ],
   "permissions": [
     "core:default",
     "notification:default",
+    "dialog:default",
     "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-is-visible",
     "core:window:allow-start-dragging"
   ]
 }

@@ -38,7 +38,19 @@ pub fn import(
             let chapter_id = db.upsert_chapter(deck_id, &chapter.name)?;
             for card in &chapter.cards {
                 imported_keys.insert((deck.name.clone(), chapter.name.clone(), card.title.clone()));
-                match db.find_card_in_chapter(chapter_id, &card.title)? {
+                // A 题面卡's title is a projection of its 题干, so rewording the
+                // question changes the title — matching by title would mint a
+                // second card and lose the review progress (SPEC §5.3: 题目改字
+                // 不影响匹配). A chapter holds at most ONE front card
+                // (parser rule 10), so that card is the identity.
+                let existing = match db.find_card_in_chapter(chapter_id, &card.title)? {
+                    Some(c) => Some(c),
+                    None if !card.front_md.is_empty() => {
+                        db.find_front_card_in_chapter(chapter_id)?
+                    }
+                    None => None,
+                };
+                match existing {
                     None => {
                         db.insert_card(
                             &NewCard {
@@ -46,6 +58,7 @@ pub fn import(
                                 chapter: chapter.name.clone(),
                                 title: card.title.clone(),
                                 content_md: card.content_md.clone(),
+                                front_md: card.front_md.clone(),
                                 source_file: source_file.map(str::to_string),
                             },
                             now,
@@ -56,10 +69,15 @@ pub fn import(
                         if existing.locally_edited && !prefer_file_on_conflict {
                             // SPEC §5.3: keep the locally annotated version.
                             report.conflicts += 1;
-                        } else if existing.content_md != card.content_md {
-                            db.update_card_content(
+                        } else if existing.content_md != card.content_md
+                            || existing.front_md != card.front_md
+                            || existing.title != card.title
+                        {
+                            db.update_card_from_import(
                                 existing.id,
+                                &card.title,
                                 &card.content_md,
+                                &card.front_md,
                                 source_file,
                                 prefer_file_on_conflict,
                             )?;
@@ -198,6 +216,98 @@ mod tests {
             db.0.query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))
                 .unwrap();
         assert_eq!(total, 2, "removed-in-source card must be kept");
+    }
+
+    // ---- 题面卡 (需求7, SPEC §5.2 rule 10 / §5.3) ----
+
+    const FRONT_V1: &str = "# D\n\n## 题\n\n![图](u1.png)\n这题怎么解？\n";
+    const FRONT_V2: &str = "# D\n\n## 题\n\n![图](u1.png)\n这题怎么解？（改了措辞）\n";
+
+    #[test]
+    fn front_card_imports_with_projected_title() {
+        let db = Db::open_in_memory().unwrap();
+        let report = import_src(&db, FRONT_V1, false);
+        assert_eq!(report.added, 1);
+        let card = find_card(&db, "🖼 · 这题怎么解？");
+        assert_eq!(card.front_md, "![图](u1.png)\n这题怎么解？");
+        assert_eq!(card.content_md, "", "背面留空");
+        assert_eq!(card.state, "new");
+    }
+
+    /// SPEC §5.3: 「题目改字不影响匹配」——题面卡的 title 是题干的投影，改措辞会
+    /// 改投影，所以身份**不能**靠 title 匹配（那样会铸出一张新卡、丢掉复习进度）。
+    /// 一个章节最多一张题面卡（rule 10），那张卡就是身份。
+    #[test]
+    fn front_card_wording_edit_keeps_progress() {
+        let db = Db::open_in_memory().unwrap();
+        import_src(&db, FRONT_V1, false);
+        let card = find_card(&db, "🖼 · 这题怎么解？");
+        db.0.execute(
+            "UPDATE card SET state='review', reps=5 WHERE id=?1",
+            [card.id],
+        )
+        .unwrap();
+
+        let report = import_src(&db, FRONT_V2, false);
+        assert_eq!(
+            (report.added, report.updated, report.kept_missing),
+            (0, 1, 0),
+            "同一张卡被更新：不新增、也不算源文件里丢卡"
+        );
+        let after = db.get_card(card.id).unwrap().unwrap();
+        assert_eq!(after.title, "🖼 · 这题怎么解？（改了措辞）");
+        assert_eq!(after.front_md, "![图](u1.png)\n这题怎么解？（改了措辞）");
+        assert_eq!(after.reps, 5, "复习进度保留");
+        assert_eq!(after.state, "review");
+    }
+
+    /// Characterises **why** the fallback above is required, without touching the
+    /// implementation: with the pre-需求7 rule (match by title only) the same
+    /// reworded 题面 would not be found at all, so the import would mint a second
+    /// card and strand the old one. Anyone can run this to see the failure mode
+    /// the shipped rule prevents (the red state of
+    /// `front_card_wording_edit_keeps_progress`).
+    #[test]
+    fn title_only_matching_would_miss_a_reworded_front_card() {
+        let db = Db::open_in_memory().unwrap();
+        import_src(&db, FRONT_V1, false);
+        let card = find_card(&db, "🖼 · 这题怎么解？");
+        let chapter_id: i64 =
+            db.0.query_row("SELECT chapter_id FROM card WHERE id=?1", [card.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let parsed = parse_markdown(FRONT_V2, "fallback");
+        let incoming = &parsed[0].chapters[0].cards[0];
+
+        assert!(
+            db.find_card_in_chapter(chapter_id, &incoming.title)
+                .unwrap()
+                .is_none(),
+            "改措辞 → 投影变了 → 按 title 找不到（旧规则会在这里铸一张新卡）"
+        );
+        assert_eq!(
+            db.find_front_card_in_chapter(chapter_id)
+                .unwrap()
+                .map(|c| c.id),
+            Some(card.id),
+            "发货的规则按『章节内唯一题面卡』命中同一张卡"
+        );
+    }
+
+    #[test]
+    fn locally_edited_keeps_local_front() {
+        let db = Db::open_in_memory().unwrap();
+        import_src(&db, FRONT_V1, false);
+        let card = find_card(&db, "🖼 · 这题怎么解？");
+        db.0.execute("UPDATE card SET locally_edited=1 WHERE id=?1", [card.id])
+            .unwrap();
+
+        let report = import_src(&db, FRONT_V2, false);
+        assert_eq!((report.conflicts, report.updated), (1, 0));
+        let after = db.get_card(card.id).unwrap().unwrap();
+        assert_eq!(after.front_md, "![图](u1.png)\n这题怎么解？", "本地版优先");
+        assert!(after.locally_edited);
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { api, type CardDto } from "../lib/api";
 const LEVEL_NAMES = ["新卡", "刚接触", "能回忆", "基本熟练", "长期维护", "长期维护"];
 
 /** 疑难卡片（SPEC §12.1）: consecutive-Unknown cards that need deliberate work. */
-export default function LeechesPage() {
+export default function LeechesPage({ onBack }: { onBack: () => void }) {
   const [cards, setCards] = useState<CardDto[]>([]);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
@@ -41,6 +41,9 @@ export default function LeechesPage() {
 
   return (
     <section className="page">
+      <button className="page-back btn" onClick={onBack}>
+        ← 返回首页
+      </button>
       <h1>疑难卡</h1>
       <p className="muted small">
         连续多次评「不了解」的卡片会自动出现在这里。建议先补强理解或拆分卡片，再解除标记或重置进度。

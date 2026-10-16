@@ -12,28 +12,50 @@ type DbState<'a> = State<'a, Mutex<Db>>;
 type SessionState<'a> = State<'a, ReviewSession>;
 
 fn lock<'a>(db: &'a DbState<'a>) -> std::sync::MutexGuard<'a, Db> {
-    db.lock().expect("db mutex poisoned")
+    db.lock().unwrap_or_else(crate::recover_lock)
 }
 
-/// Popup queue: a pending manual selection first, else the due queue.
+/// Frontend diagnostics funnel into the same log file as the Rust side, so a
+/// bug report only needs one artifact. Level comes from the UI and is mapped
+/// defensively; messages are error strings and component state, never card
+/// content.
+#[tauri::command]
+pub fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => log::error!(target: "frontend", "{message}"),
+        "warn" => log::warn!(target: "frontend", "{message}"),
+        "info" => log::info!(target: "frontend", "{message}"),
+        _ => log::debug!(target: "frontend", "{message}"),
+    }
+}
+
+/// Popup queue: a pending manual selection first, else the due queue sized by
+/// SPEC §7.4 — `min(每次弹窗卡片数, 候选数)`. A pending manual session ignores
+/// the size entirely (the user picked those cards; see `services::review_queue`).
 #[tauri::command]
 pub fn review_queue(
     session: SessionState,
     db: DbState,
     app: tauri::AppHandle,
 ) -> Result<Vec<CardDto>, String> {
-    let limit = app
-        .try_state::<Mutex<Db>>()
-        .and_then(|cell| {
-            let guard = cell.lock().ok()?;
-            guard
-                .get_setting("per_popup")
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse::<i64>().ok())
+    crate::logging::breadcrumb("cmd:review-queue-in");
+    // 连续关闭惩罚: the engine caps the next due-queue popup to 1 card. A
+    // lock-free atomic read — never a mutex the engine may hold across window
+    // operations (that deadlocked the app, see EngineShared).
+    let dodge_cap = app
+        .try_state::<crate::engine::EngineShared>()
+        .map(|s| {
+            s.session_size_override
+                .load(std::sync::atomic::Ordering::Relaxed)
         })
-        .unwrap_or(1);
-    services::review_queue(&lock(&db), &session, limit)
+        .unwrap_or(0);
+    let r = {
+        let guard = lock(&db);
+        let size = services::session_size(services::per_popup_size(&guard), dodge_cap);
+        services::review_queue(&guard, &session, size)
+    };
+    crate::logging::breadcrumb("cmd:review-queue-out");
+    r
 }
 
 /// Start a review session over explicit cards and open the popup at once.
@@ -54,10 +76,118 @@ pub fn start_review(
     let ids: Vec<i64> = cards.iter().map(|c| c.id).collect();
     let n = ids.len();
     services::set_review_session(&session, ids);
-    if !crate::engine::open_review_popup(&app) {
-        return Err("无法打开复习弹窗".into());
-    }
+    // Do not synchronously create a Webview2 window from an invoke handler on
+    // Windows. Tauri documents that this can deadlock the UI thread and leave
+    // a blank, unresponsive popup. The session is stored first, then the
+    // window is created on a detached worker thread.
+    std::thread::spawn(move || {
+        if !crate::engine::open_review_popup(&app) {
+            log::error!("[review] failed to open popup window after start_review");
+        }
+    });
     Ok(n)
+}
+
+/// "学新卡" home-page trigger: open a popup session over the remaining daily
+/// new-card quota (per-session quota does not apply; the daily one does).
+#[tauri::command]
+pub fn start_new_review(
+    session: SessionState,
+    db: DbState,
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    let cards = services::new_cards_queue(&lock(&db))?;
+    let ids: Vec<i64> = cards.iter().map(|c| c.id).collect();
+    let n = ids.len();
+    services::set_review_session(&session, ids);
+    // Same off-thread popup creation as start_review (WebView2 deadlock).
+    std::thread::spawn(move || {
+        if !crate::engine::open_review_popup(&app) {
+            log::error!("[review] failed to open popup window after start_new_review");
+        }
+    });
+    Ok(n)
+}
+
+/// 组卷: compose a custom session from deck quotas (+ today's due cards),
+/// load it into the explicit-session slot and open the popup.
+#[tauri::command]
+pub fn compose_exam(
+    parts: Vec<services::ExamPart>,
+    include_due: bool,
+    strategy: services::ExamStrategy,
+    session: SessionState,
+    db: DbState,
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    let n = services::compose_exam(&lock(&db), &session, &parts, include_due, strategy)?;
+    std::thread::spawn(move || {
+        if !crate::engine::open_review_popup(&app) {
+            log::error!("[review] failed to open popup window after compose_exam");
+        }
+    });
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn save_exam_preset(name: String, config_json: String, db: DbState) -> Result<i64, String> {
+    services::save_exam_preset(&lock(&db), &name, &config_json)
+}
+
+#[tauri::command]
+pub fn list_exam_presets(db: DbState) -> Result<Vec<(i64, String, String)>, String> {
+    services::list_exam_presets(&lock(&db))
+}
+
+#[tauri::command]
+pub fn delete_exam_preset(id: i64, db: DbState) -> Result<bool, String> {
+    services::delete_exam_preset(&lock(&db), id)
+}
+
+/// Frontend reports how a popup session ended (close policy): reason
+/// "completed" | "closed"; unknown-by-absence never counts as a dodge.
+#[tauri::command]
+pub fn report_popup_session(
+    session_id: i64,
+    reason: String,
+    shown: Option<i64>,
+    rated: Option<i64>,
+    db: DbState,
+) -> Result<(), String> {
+    services::report_popup_session(&lock(&db), session_id, &reason, shown, rated)
+}
+
+/// Close-policy context for the popup UI (strict flag + current dodge streak).
+#[tauri::command]
+pub fn close_context(db: DbState) -> Result<services::CloseContext, String> {
+    services::close_context(&lock(&db))
+}
+
+/// 弹窗内的交互心跳（离手逃离用，SPEC §8.4）：揭示答案、评分、跳过、编辑、
+/// 按键都会由前端**节流**上报一次，引擎据此判断"人还在不在"。纯内存原子写，
+/// 不落库、不返回东西——这里只做一次 store，调用方不需要等结果。
+#[tauri::command]
+pub fn popup_activity(app: tauri::AppHandle) {
+    crate::engine::mark_popup_activity(&app);
+}
+
+/// Explicit home-page trigger. Running the native window operation off the
+/// invoke callback avoids the WebView2 UI-thread deadlock on Windows.
+#[tauri::command]
+pub async fn open_review_now(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::engine::open_review_popup(&app) {
+            Ok(())
+        } else {
+            // Also logged: the frontend surfaces the failure, but the reason
+            // belongs in the log file for the bug report.
+            let msg = "复习弹窗打开失败";
+            log::error!("[review] open_review_now failed (popup missing or show error)");
+            Err(msg.to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -81,6 +211,9 @@ pub fn get_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
 #[tauri::command]
 pub fn edit_card_in_main(card_id: i64, app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
+    if let Some(state) = app.try_state::<crate::PopupResumeState>() {
+        *state.0.lock().map_err(|_| "popup 状态锁失败".to_string())? = true;
+    }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.unminimize();
@@ -106,15 +239,25 @@ pub fn preview_import(files: Vec<ImportFile>, db: DbState) -> Result<ImportPrevi
     services::preview_import(&lock(&db), &files)
 }
 
+/// `front_md` is the optional 题面 (SPEC §5.2 rule 10, 需求7); omitting it keeps
+/// the pre-需求7 call shape and creates a plain card.
 #[tauri::command]
 pub fn add_card(
     deck: String,
     chapter: String,
     title: String,
     content_md: String,
+    front_md: Option<String>,
     db: DbState,
 ) -> Result<CardDto, String> {
-    services::add_card(&lock(&db), &deck, &chapter, &title, &content_md)
+    services::add_card_with_front(
+        &lock(&db),
+        &deck,
+        &chapter,
+        &title,
+        &content_md,
+        front_md.as_deref().unwrap_or(""),
+    )
 }
 
 #[tauri::command]
@@ -142,14 +285,23 @@ pub fn delete_card(card_id: i64, db: DbState) -> Result<(), String> {
     services::delete_card(&lock(&db), card_id)
 }
 
+/// `front_md`: `None` (or an omitted argument) leaves the 题面 untouched — the
+/// card editor only sends it when it actually edits the front (需求7).
 #[tauri::command]
 pub fn update_card(
     card_id: i64,
     title: String,
     content_md: String,
+    front_md: Option<String>,
     db: DbState,
 ) -> Result<CardDto, String> {
-    services::update_card(&lock(&db), card_id, &title, &content_md)
+    services::update_card_with_front(
+        &lock(&db),
+        card_id,
+        &title,
+        &content_md,
+        front_md.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -159,17 +311,32 @@ pub fn save_card_content(card_id: i64, content_md: String, db: DbState) -> Resul
 
 #[tauri::command]
 pub fn due_queue(limit: i64, db: DbState) -> Result<Vec<CardDto>, String> {
-    services::due_queue(&lock(&db), limit)
+    // The roll drives the 15% 归档抽查 slot; nanos give a fresh draw per call.
+    let roll = f64::from(chrono::Utc::now().timestamp_subsec_nanos()) / 1e9;
+    services::due_queue(&lock(&db), limit, roll)
 }
 
 #[tauri::command]
-pub fn rate_card(card_id: i64, rating: String, db: DbState) -> Result<CardDto, String> {
-    services::rate(&mut lock(&db), card_id, &rating)
+pub fn rate_card(
+    card_id: i64,
+    rating: String,
+    elapsed_ms: Option<i64>,
+    app: tauri::AppHandle,
+    db: DbState,
+) -> Result<CardDto, String> {
+    crate::logging::breadcrumb("cmd:rate-in");
+    let dto = services::rate(&mut lock(&db), card_id, &rating, elapsed_ms);
+    crate::logging::breadcrumb("cmd:rate-out");
+    // Wake the engine: the queue shape changed.
+    crate::engine::notify(&app, crate::engine::EngineEvent::ReviewActivity);
+    dto
 }
 
 #[tauri::command]
-pub fn skip_card(card_id: i64, db: DbState) -> Result<CardDto, String> {
-    services::skip_card(&lock(&db), card_id)
+pub fn skip_card(card_id: i64, app: tauri::AppHandle, db: DbState) -> Result<CardDto, String> {
+    let dto = services::skip_card(&lock(&db), card_id);
+    crate::engine::notify(&app, crate::engine::EngineEvent::ReviewActivity);
+    dto
 }
 
 #[tauri::command]
@@ -188,8 +355,25 @@ pub fn due_count(db: DbState) -> Result<i64, String> {
 }
 
 #[tauri::command]
+pub fn goal_status(db: DbState) -> Result<services::GoalStatus, String> {
+    services::goal_status(&lock(&db))
+}
+
+/// 屏幕监控实时状态（设置页「实时捕捉」面板）：上一次采样看到的进程/标题/
+/// 命中规则——纯内存读取，不落库不写日志。
+#[tauri::command]
+pub fn activity_status(app: tauri::AppHandle) -> Result<crate::activity::ActivityStatus, String> {
+    app.try_state::<std::sync::Arc<crate::activity::ActivityShared>>()
+        .map(|s| s.status())
+        .ok_or_else(|| "activity monitor not started".into())
+}
+
+#[tauri::command]
 pub fn get_stats(db: DbState) -> Result<services::StatsDto, String> {
-    services::get_stats(&lock(&db))
+    crate::logging::breadcrumb("cmd:get-stats-in");
+    let r = services::get_stats(&lock(&db));
+    crate::logging::breadcrumb("cmd:get-stats-out");
+    r
 }
 
 #[tauri::command]
@@ -253,6 +437,49 @@ pub fn get_settings(db: DbState) -> Result<HashMap<String, String>, String> {
 }
 
 #[tauri::command]
-pub fn set_settings(map: HashMap<String, String>, db: DbState) -> Result<(), String> {
-    services::set_settings(&lock(&db), &map.into_iter().collect::<Vec<_>>())
+pub fn set_settings(
+    map: HashMap<String, String>,
+    app: tauri::AppHandle,
+    db: DbState,
+) -> Result<(), String> {
+    crate::logging::breadcrumb("cmd:set-settings-in");
+    services::set_settings(&lock(&db), &map.into_iter().collect::<Vec<_>>())?;
+    crate::logging::breadcrumb("cmd:set-settings-db-done");
+    // Drop the engine's cached settings so the change lands on the next wake.
+    crate::engine::notify(&app, crate::engine::EngineEvent::SettingsChanged);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 图片附件
+// SPEC §5.4: card images live in %APPDATA%\FlashMemo\attachments and the card
+// markdown only stores an `attachment:<file>` reference.
+
+/// Folder the frontend resolves `attachment:` refs against (asset protocol).
+#[tauri::command]
+pub fn attachment_dir() -> Result<String, String> {
+    let dir = crate::attachments::store_dir()?;
+    // Forward slashes: the path goes into a URL, and Windows accepts both.
+    Ok(dir.to_string_lossy().replace('\\', "/"))
+}
+
+/// Store a picked image file (native dialog path) and return its markdown ref.
+#[tauri::command]
+pub fn save_attachment_file(path: String) -> Result<String, String> {
+    let dir = crate::attachments::store_dir()?;
+    crate::attachments::save_file(&dir, std::path::Path::new(&path))
+}
+
+/// Store pasted/clipboard image bytes (`data:` URL) and return the markdown ref.
+#[tauri::command]
+pub fn save_attachment(data: String, ext: Option<String>) -> Result<String, String> {
+    let dir = crate::attachments::store_dir()?;
+    let (bytes, mime) = crate::attachments::parse_data_url(&data)?;
+    crate::attachments::save_bytes(&dir, &bytes, ext.as_deref().or(mime.as_deref()))
+}
+
+/// Read picked `.md` files (native dialog gives paths, not contents) so the
+/// import can resolve image refs relative to each file's folder.
+#[tauri::command]
+pub fn read_markdown_files(paths: Vec<String>) -> Result<Vec<ImportFile>, String> {
+    services::read_markdown_files(&paths)
 }

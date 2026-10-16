@@ -12,13 +12,50 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "闪记",
-        "width": 800,
-        "height": 600
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640
+      },
+      {
+        "label": "popup",
+        "title": "闪记",
+        "url": "index.html",
+        "visible": false,
+        "width": 760,
+        "height": 680,
+        "decorations": false,
+        "shadow": true,
+        "resizable": true,
+        "minWidth": 600,
+        "minHeight": 560,
+        "focus": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "minimizable": false,
+        "maximizable": false
       }
     ],
     "security": {
-      "csp": null
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      },
+      "csp": {
+        "default-src": ["'self'"],
+        "connect-src": [
+          "'self'",
+          "ipc:",
+          "http://ipc.localhost",
+          "ws://localhost:1420",
+          "http://localhost:1420"
+        ],
+        "img-src": ["'self'", "asset:", "http://asset.localhost", "data:", "blob:"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "font-src": ["'self'", "data:"]
+      }
     }
   },
   "bundle": {

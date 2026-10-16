@@ -1,5 +1,5 @@
-import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { api } from "./api";
 
 /**
  * Captured at module-load time, BEFORE `installMockBackend()` patches
@@ -35,7 +35,7 @@ export function currentWindowLabel(): string {
  */
 export async function triggerReviewNow(): Promise<void> {
   if (runningInTauri) {
-    await emit("force-review");
+    await api.openReviewNow();
   } else {
     window.location.search = "?window=popup";
   }
