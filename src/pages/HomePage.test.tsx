@@ -112,3 +112,49 @@ describe("主页「待复习」与弹窗取卡同源（Bug1 / t14）", () => {
     expect(dueNumber(dom)).toBe(before - 1);
   });
 });
+
+describe("今日目标的负数输入（2026-10-25 边界模拟）", () => {
+  it("输入负数点保存：报错并保留原目标，不静默关掉", async () => {
+    // 先立一个在生效的目标，验证「坏了不许弄丢它」。
+    await api.setSettings({ goal_enabled: "1", goal_target: "10", goal_start: "19:00", goal_end: "22:00" });
+    const dom = await mountHome();
+    await settle();
+
+    const open = [...dom.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("修改"),
+    );
+    expect(open, "目标生效态应有「修改」按钮").toBeTruthy();
+    await act(async () => {
+      open?.click();
+    });
+    await settle();
+
+    const input = dom.querySelector<HTMLInputElement>('input[placeholder="如 100"]');
+    expect(input, "目标编辑器应有张数输入框").toBeTruthy();
+    await act(async () => {
+      // React 受控输入必须走原型 setter + input 事件；直接给 .value 赋值会
+      // 污染 React 的值跟踪器，之后的 onChange 会被去重掉。
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "-20");
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+
+    const save = [...dom.querySelectorAll("button")].find((b) => (b.textContent ?? "") === "保存");
+    await act(async () => {
+      save?.click();
+    });
+    await settle();
+
+    const alert = dom.querySelector('[role="alert"]');
+    expect(alert?.textContent ?? "", "应给出「大于 0」的明确报错").toContain("大于 0");
+    // 编辑器保持打开（不是静默关闭），原目标原封不动。
+    expect(dom.querySelector('input[placeholder="如 100"]'), "编辑器应保持打开").toBeTruthy();
+    const g = await api.goalStatus();
+    expect(g.enabled).toBe(true);
+    expect(g.target).toBe(10);
+  });
+});

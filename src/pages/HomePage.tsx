@@ -141,6 +141,12 @@ export default function HomePage({
    *  next tick (set_settings wakes it) — 目标当天作废, never debt. */
   async function saveGoal() {
     setGoalMsg("");
+    // 负数在这里拦下并留在编辑器里：静默转成 0 会把用户已生效的目标悄悄关掉
+    // （2026-10-25 边界模拟）。空输入 = 清掉目标，是有意的关法。
+    if (goalDraft.target < 0) {
+      setGoalMsg("目标需为大于 0 的整数");
+      return;
+    }
     const target = Math.max(0, Math.round(goalDraft.target || 0));
     try {
       await api.setSettings({
