@@ -93,9 +93,27 @@ const FIELDS: {
   { key: "session_new_limit", label: "每次弹窗新卡上限", hint: "默认 1" },
   { key: "skip_delay_min", label: "跳过重入队延迟（分钟）", hint: "10 ~ 120" },
   {
+    key: "fullscreen_dnd",
+    label: "全屏免打扰",
+    hint: "检测到全屏应用（游戏/视频/演示）时，自动弹窗改为轻提醒；手动「立即复习」不受影响",
+    options: [
+      { value: "1", label: "开启（默认）" },
+      { value: "0", label: "关闭" },
+    ],
+  },
+  {
     key: "daily_popup_limit",
     label: "每日弹窗上限",
     hint: "默认 40；0 = 不限。超过后当天只保留轻提醒（系统通知）",
+  },
+  {
+    key: "autostart",
+    label: "开机自启",
+    hint: "开机自动驻留托盘（系统启动项，改动即时生效）",
+    options: [
+      { value: "1", label: "开启" },
+      { value: "0", label: "关闭" },
+    ],
   },
   {
     key: "notify_mode",
@@ -140,7 +158,7 @@ const FIELDS: {
 ];
 
 const GROUPS: { title: string; keys: string[] }[] = [
-  { title: "弹窗与学习时段", keys: ["popup_interval_min", "per_popup", "study_start", "study_end", "notify_mode", "daily_popup_limit", "popup_idle_escape_min", "close_policy", "no_close_first_n"] },
+  { title: "弹窗与学习时段", keys: ["autostart", "popup_interval_min", "per_popup", "study_start", "study_end", "notify_mode", "daily_popup_limit", "popup_idle_escape_min", "close_policy", "no_close_first_n", "fullscreen_dnd"] },
   { title: "间隔调度（隔 N 张）", keys: ["gap_unknown", "gap_familiar", "gap_speakable", "level_gaps"] },
   { title: "重点卡与时间保护", keys: ["attention_threshold", "attention_gap", "max_unknown_gap", "floor_unknown_min", "floor_familiar_min", "floor_speakable_min"] },
   { title: "每日上限与 AI", keys: ["daily_new_limit", "session_new_limit", "skip_delay_min"] },
@@ -153,6 +171,27 @@ export default function SettingsPage() {
   const [backupMsg, setBackupMsg] = useState("");
   const [rules, setRules] = useState<ActivityRule[]>(DEFAULT_RULES);
   const [live, setLive] = useState<ActivityStatus | null>(null);
+  // 开机自启是系统级开关：读真实状态展示，改动即时生效（不等「保存设置」）。
+  const [autostartOn, setAutostartOn] = useState(false);
+  const [autostartMsg, setAutostartMsg] = useState("");
+
+  useEffect(() => {
+    api
+      .getAutostart()
+      .then(setAutostartOn)
+      .catch(() => {});
+  }, []);
+
+  async function toggleAutostart(on: boolean) {
+    setAutostartMsg("");
+    try {
+      const now = await api.setAutostart(on);
+      setAutostartOn(now);
+      setAutostartMsg(now ? "已开启：下次开机自动驻留托盘" : "已关闭");
+    } catch (e) {
+      setAutostartMsg(errText(e));
+    }
+  }
 
   // 实时捕捉：设置页打开时每 2 秒拉一次监控的上次采样（纯内存，不落库）。
   useEffect(() => {
@@ -252,7 +291,18 @@ export default function SettingsPage() {
                     <label title={f.hint}>{f.label}</label>
                     {f.hint && <span className="muted small">{f.hint}</span>}
                   </div>
-                  {f.options ? (
+                  {f.key === "autostart" ? (
+                    <div className="autostart-cell">
+                      <select
+                        value={autostartOn ? "1" : "0"}
+                        onChange={(e) => void toggleAutostart(e.target.value === "1")}
+                      >
+                        <option value="1">开启</option>
+                        <option value="0">关闭</option>
+                      </select>
+                      {autostartMsg && <span className="ok small">{autostartMsg}</span>}
+                    </div>
+                  ) : f.options ? (
                     <select
                       value={values[f.key] ?? f.options[0].value}
                       onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}

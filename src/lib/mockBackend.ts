@@ -244,6 +244,8 @@ try {
 const MUTATING = new Set([
   "import_markdown",
   "import_sample_deck",
+  "get_autostart",
+  "set_autostart",
   "add_card",
   "delete_card",
   "delete_deck",
@@ -514,6 +516,9 @@ const SAMPLE_DECK_MD = `# 面试八股 · 示例
 
 DNS 解析 → TCP 握手 → TLS → HTTP → 渲染。
 `;
+
+/** 浏览器里没有启动项可写：开关只在内存里翻转，UI 流程照走。 */
+let mockAutostart = false;
 
 async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<unknown> {
   switch (cmd) {
@@ -992,6 +997,11 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         .filter(matchesFilter)
         .map(clone);
     }
+    case "get_autostart":
+      return mockAutostart;
+    case "set_autostart":
+      mockAutostart = Boolean(a.enabled);
+      return mockAutostart;
     case "import_sample_deck":
       // 与 Rust include_str! 的 sample-deck.md 同源镜像（浏览器模式走通流程）。
       return handleCommand("import_markdown", {

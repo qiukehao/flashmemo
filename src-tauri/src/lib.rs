@@ -123,6 +123,12 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // 开机自启（SPEC §13/§16）：托盘常驻应用重启后必须在——注册表/启动项
+        // 由插件管理，Windows 走 Run 键；状态由设置页即时读写。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             // SPEC §14: data lives in %APPDATA%\FlashMemo.
             let appdata =
@@ -404,6 +410,8 @@ pub fn run() {
             commands::save_attachment,
             commands::save_attachment_file,
             commands::read_markdown_files,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

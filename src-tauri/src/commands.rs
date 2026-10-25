@@ -489,3 +489,27 @@ pub fn save_attachment(data: String, ext: Option<String>) -> Result<String, Stri
 pub fn read_markdown_files(paths: Vec<String>) -> Result<Vec<ImportFile>, String> {
     services::read_markdown_files(&paths)
 }
+
+/// 开机自启当前状态（读系统启动项，不是 KV——用户可能在任务管理器里改过）。
+#[tauri::command]
+pub fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("读取开机自启状态失败: {e}"))
+}
+
+/// 即时切换（不等「保存设置」：这是系统级开关，落库只会造成两套真相）。
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    if enabled {
+        autolaunch.enable().map_err(|e| format!("开启开机自启失败: {e}"))?;
+    } else {
+        autolaunch.disable().map_err(|e| format!("关闭开机自启失败: {e}"))?;
+    }
+    autolaunch
+        .is_enabled()
+        .map_err(|e| format!("读取开机自启状态失败: {e}"))
+}

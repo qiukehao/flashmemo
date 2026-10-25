@@ -2751,6 +2751,12 @@ textarea {
 }
 
 /* 今日目标 (2026-10-06 rework): one compact strip — icon, body, action. */
+.autostart-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* 首启引导（空库）：把「导入示例卡包」做成第一眼的主行动。 */
 .empty-onboard {
   display: flex;

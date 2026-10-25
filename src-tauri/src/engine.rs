@@ -41,6 +41,9 @@ pub struct EngineSettings {
     /// 离手逃离 (2026-10-06): 弹窗开着但这么久没有任何交互、鼠标也不在弹窗上，
     /// 就把它拉回光标所在显示器并记一次逃避。0 = 关闭该保护。
     pub popup_idle_escape_min: u32,
+    /// 全屏免打扰 (SPEC §8, 2026-10-25): 前台应用全屏（游戏/视频/演示）时，
+    /// 自动弹窗降级为轻提醒；手动触发不受影响。
+    pub fullscreen_dnd: bool,
 }
 
 impl Default for EngineSettings {
@@ -61,6 +64,7 @@ impl Default for EngineSettings {
             goal_end: "22:00".into(),
             // 5 分钟：足够读完一张卡加批注，又不足以"拖到副屏放着不管"。
             popup_idle_escape_min: 5,
+            fullscreen_dnd: true,
         }
     }
 }
@@ -140,6 +144,28 @@ pub fn mark_popup_activity(app: &tauri::AppHandle) {
 pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
     let (h, m) = s.split_once(':')?;
     Some((h.trim().parse().ok()?, m.trim().parse().ok()?))
+}
+
+/// 全屏免打扰判定（纯函数）：设置开启 + 前台全屏 + 非手动触发三者同时成立
+/// 才拦截。手动「立即复习」永远是显式意图，不该被挡。
+pub fn dnd_blocks_popup(fullscreen_busy: bool, setting_on: bool, force: bool) -> bool {
+    setting_on && fullscreen_busy && !force
+}
+
+/// 前台是否处于"不该糊脸"的状态（全屏游戏/视频、演示模式、全屏忙碌）。
+/// 取状态失败按"非全屏"处理（fail-open：一个 API 失败不能把复习静默关掉）。
+fn fullscreen_dnd_busy() -> bool {
+    use windows_sys::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    let mut state = 0i32;
+    // SAFETY: 出参是普通枚举指针；函数只写这一块内存，无其它副作用。
+    let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+    if hr != 0 {
+        return false;
+    }
+    state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE
 }
 
 /// SPEC §8.5: outside the study window nothing pops. Malformed settings fall
@@ -398,6 +424,7 @@ fn read_settings(db: &Db) -> EngineSettings {
         popup_idle_escape_min: get("popup_idle_escape_min")
             .and_then(|v| v.parse().ok())
             .unwrap_or(5),
+        fullscreen_dnd: get("fullscreen_dnd").map(|v| v.trim() != "0").unwrap_or(true),
     }
 }
 
@@ -659,6 +686,13 @@ pub fn tick(
             false
         }
         Decision::Open => {
+            // 全屏免打扰（2026-10-25）：自动弹窗在游戏/视频/演示时降级为轻提醒——
+            // 糊脸弹窗是打断式应用被卸载的头号理由；手动触发已在 force 里放行。
+            if dnd_blocks_popup(fullscreen_dnd_busy(), settings.fullscreen_dnd, force) {
+                log::debug!("[engine] fullscreen DND: popup degraded to light reminder");
+                maybe_notify(app, due, effective_interval, false, &mut st);
+                return false;
+            }
             // 学习应用延后 (2026-10-05, 评审建议): 弹窗该响时人正在 IDE/文档
             // 里深度工作 → 等下一次切换应用的间隙再弹（最多延后 15 分钟，
             // 到点照弹）；手动触发与调试直通不受延后影响。
@@ -1473,6 +1507,15 @@ mod tests {
         let (x, y) = popup_position(portrait, POPUP_SIZE);
         assert!((x - (-1152.0 + (1152.0 - POPUP_SIZE.0) / 2.0)).abs() < 0.01);
         assert!((y - (-512.0 + (2048.0 - 48.0 - POPUP_SIZE.1) / 2.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn dnd_blocks_only_auto_popups_while_fullscreen() {
+        use crate::engine::dnd_blocks_popup;
+        assert!(dnd_blocks_popup(true, true, false), "全屏 + 开启 + 自动 → 拦");
+        assert!(!dnd_blocks_popup(true, true, true), "手动触发永不拦");
+        assert!(!dnd_blocks_popup(true, false, false), "设置关了就不拦");
+        assert!(!dnd_blocks_popup(false, true, false), "没在全屏不拦");
     }
 
     #[test]
