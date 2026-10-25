@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, EMPTY_STATS, type GoalMode, type GoalStatus, type Stats } from "../lib/api";
+import { api, EMPTY_STATS, errText, type GoalMode, type GoalStatus, type Stats } from "../lib/api";
 import { triggerReviewNow } from "../lib/env";
 import { goalBudgetText, goalCadenceText } from "../lib/goalCadence";
 import { logFrontend } from "../lib/logger";
@@ -137,6 +137,24 @@ export default function HomePage({
     void loadStats();
   }
 
+  // 首启引导（2026-10-25）：空库时一键导入内置示例卡包，30 秒看到完整闭环。
+  const [sampleBusy, setSampleBusy] = useState(false);
+  const [sampleMsg, setSampleMsg] = useState("");
+
+  async function importSample() {
+    setSampleBusy(true);
+    setSampleMsg("");
+    try {
+      const r = await api.importSampleDeck();
+      setSampleMsg(`已导入示例卡包：新增 ${r.added} 张`);
+      await loadStats();
+    } catch (e) {
+      setSampleMsg(errText(e));
+    } finally {
+      setSampleBusy(false);
+    }
+  }
+
   /** Save the daily goal. The engine recomputes the popup interval on the
    *  next tick (set_settings wakes it) — 目标当天作废, never debt. */
   async function saveGoal() {
@@ -209,6 +227,32 @@ export default function HomePage({
           </p>
         )}
       </div>
+
+      {stats.totalCards === 0 && (
+        <div className="empty-onboard" role="status">
+          <span className="empty-onboard-icon" aria-hidden="true">✦</span>
+          <div className="empty-onboard-body">
+            <h2>从这里开始</h2>
+            <p className="muted">
+              导入你的 Markdown 笔记（`#` 卡包 · `##` 章节 · `###` 卡片），
+              或先用内置示例卡包体验「导入 → 弹窗 → 评分调度」的完整流程。
+            </p>
+            <div className="empty-onboard-actions">
+              <button
+                className="btn primary"
+                onClick={() => void importSample()}
+                disabled={sampleBusy}
+              >
+                {sampleBusy ? "导入中…" : "导入示例卡包"}
+              </button>
+              <button className="btn" onClick={() => onNavigate("import")}>
+                导入我的笔记
+              </button>
+              {sampleMsg && <span className="muted small">{sampleMsg}</span>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="goal-panel">
         <span className="goal-icon" aria-hidden="true">◎</span>

@@ -349,6 +349,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::frontend_log,
             commands::import_markdown,
+            commands::import_sample_deck,
             commands::preview_import,
             commands::add_card,
             commands::list_overview,

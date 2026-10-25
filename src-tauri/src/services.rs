@@ -282,6 +282,17 @@ fn import_markdown_with_store(
     import::import(db, &decks, None, prefer_file).map_err(|e| e.to_string())
 }
 
+/// The bundled demo deck (first-run onboarding): the same import path as a
+/// user-picked file, so re-importing stays idempotent and local edits win.
+pub fn import_sample_deck(db: &Db) -> Result<ImportReport, String> {
+    let files = vec![ImportFile {
+        name: "示例卡包.md".into(),
+        content: include_str!("../assets/sample-deck.md").into(),
+        path: None,
+    }];
+    import_markdown(db, &files, false)
+}
+
 /// Parse without inserting: SPEC §5.3 import preview (N decks / M chapters / K
 /// cards), plus how many locally-edited cards would conflict.
 pub fn preview_import(db: &Db, files: &[ImportFile]) -> Result<ImportPreview, String> {
@@ -1842,6 +1853,32 @@ mod tests {
             raw.next_eligible_seq,
             seq + 7,
             "抽查回炉的间距必须用用户配置，而不是默认 3"
+        );
+    }
+
+    #[test]
+    fn sample_deck_imports_and_reimports_idempotently() {
+        let d = db();
+        let first = import_sample_deck(&d).unwrap();
+        assert!(first.added >= 9, "示例卡包至少 9 张卡，实际 {first:?}");
+        assert_eq!(first.updated, 0);
+        // 再导一次：内容没变 → 既不加也不改（报告诚实），卡片数不翻倍。
+        let overview = list_overview(&d).unwrap();
+        let total: i64 = overview.iter().map(|o| o.card_count).sum();
+        let second = import_sample_deck(&d).unwrap();
+        assert_eq!(second.added, 0);
+        assert_eq!(second.updated, 0, "同内容重导是 no-op，不算 update");
+        let overview2 = list_overview(&d).unwrap();
+        let total2: i64 = overview2.iter().map(|o| o.card_count).sum();
+        assert_eq!(total, total2, "重复导入不得复制卡片");
+        // 题面卡（> [!question]）要真的进了 front_md 而不是混进背面。
+        let cards = list_cards(&d, "面试八股 · 示例").unwrap();
+        let faced = cards.iter().find(|c| c.title.contains("URL"));
+        assert!(faced.is_some(), "示例包里的题面卡（URL→页面）应在");
+        assert!(
+            faced.unwrap().front_md.trim().starts_with("用你自己的话"),
+            "题面应落在 front_md，实际: {:?}",
+            faced.unwrap().front_md
         );
     }
 

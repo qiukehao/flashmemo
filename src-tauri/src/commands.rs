@@ -239,6 +239,12 @@ pub fn preview_import(files: Vec<ImportFile>, db: DbState) -> Result<ImportPrevi
     services::preview_import(&lock(&db), &files)
 }
 
+/// First-run onboarding: import the bundled sample deck (idempotent).
+#[tauri::command]
+pub fn import_sample_deck(db: DbState) -> Result<ImportReport, String> {
+    services::import_sample_deck(&lock(&db))
+}
+
 /// `front_md` is the optional 题面 (SPEC §5.2 rule 10, 需求7); omitting it keeps
 /// the pre-需求7 call shape and creates a plain card.
 #[tauri::command]

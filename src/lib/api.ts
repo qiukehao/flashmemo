@@ -166,6 +166,8 @@ export interface ActivityStatus {
 export const api = {
   importMarkdown: (files: ImportFile[], preferFile: boolean) =>
     invoke<ImportReport>("import_markdown", { files, preferFile }),
+  /** 首启引导：导入内置示例卡包（幂等，本地编辑优先）。 */
+  importSampleDeck: () => invoke<ImportReport>("import_sample_deck"),
   previewImport: (files: ImportFile[]) =>
     invoke<ImportPreview>("preview_import", { files }),
   /** 需求7：第 5 个参数是**可选**的题面（正面）Markdown。不传就不发该字段 ——

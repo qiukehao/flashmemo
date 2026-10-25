@@ -195,7 +195,9 @@ let links: [number, number][] = [];
 let deckChain: Record<string, boolean> = {};
 {
   const saved = loadStore();
-  if (saved?.cards?.length) {
+  // 显式空数组也是合法状态（首启引导测试种空库；用户在浏览器里删光卡片后
+  // 刷新也不该复活演示卡）——只有"没有存档"才落回演示数据。
+  if (saved && Array.isArray(saved.cards)) {
     // Normalise cards persisted by older mock versions (fields added later
     // would otherwise be undefined and poison arithmetic, e.g. NaN lapses).
     cards.splice(
@@ -241,6 +243,7 @@ try {
 /** Commands that change data and therefore trigger a localStorage write. */
 const MUTATING = new Set([
   "import_markdown",
+  "import_sample_deck",
   "add_card",
   "delete_card",
   "delete_deck",
@@ -480,6 +483,37 @@ export function installMockBackend(): void {
     return result;
   });
 }
+
+/** 内置示例卡包（镜像 src-tauri/assets/sample-deck.md，首启引导按钮用）。 */
+const SAMPLE_DECK_MD = `# 面试八股 · 示例
+
+## MySQL
+
+### 事务的隔离级别有哪些？
+
+> [!note] 傻瓜讲解
+> 把隔离级别想象成四个档位的隐私保护罩。
+
+### B+ 树和 B 树的区别？
+
+- B 树每个节点都存数据，B+ 树只有叶子节点存
+- B+ 树叶子之间有双向链表，范围查询更快
+
+## Redis
+
+### 缓存穿透、击穿、雪崩的区别与对策？
+
+穿透＝查不存在的数据；击穿＝热点 key 过期；雪崩＝一大片同时过期。
+
+## 网络
+
+### 从输入 URL 到页面展示，发生了什么？
+
+> [!question]
+> 按 DNS → TCP → TLS → HTTP → 渲染的主线讲一遍。
+
+DNS 解析 → TCP 握手 → TLS → HTTP → 渲染。
+`;
 
 async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<unknown> {
   switch (cmd) {
@@ -958,6 +992,11 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         .filter(matchesFilter)
         .map(clone);
     }
+    case "import_sample_deck":
+      // 与 Rust include_str! 的 sample-deck.md 同源镜像（浏览器模式走通流程）。
+      return handleCommand("import_markdown", {
+        files: [{ name: "示例卡包.md", content: SAMPLE_DECK_MD }],
+      });
     case "import_markdown": {
       // Real parse (TS mirror of parser.rs) so import flows are testable in
       // the browser; cards are appended to the in-memory store.

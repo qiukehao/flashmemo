@@ -2751,6 +2751,47 @@ textarea {
 }
 
 /* 今日目标 (2026-10-06 rework): one compact strip — icon, body, action. */
+/* 首启引导（空库）：把「导入示例卡包」做成第一眼的主行动。 */
+.empty-onboard {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin: 0 0 30px;
+  padding: 26px 28px;
+  background: linear-gradient(120deg, #eef1ff, #ffffff 62%);
+  border: 1px solid #d7ddfb;
+  border-radius: 17px;
+  box-shadow: 0 8px 24px rgba(82, 103, 245, 0.1);
+}
+.empty-onboard-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 46px;
+  height: 46px;
+  color: #fff;
+  font-size: 22px;
+  background: linear-gradient(135deg, #5a6cf7, #3b49d6);
+  border-radius: 13px;
+  box-shadow: 0 6px 14px rgba(82, 103, 245, 0.35);
+}
+.empty-onboard-body h2 {
+  margin: 0 0 6px;
+  font-size: 21px;
+}
+.empty-onboard-body p {
+  margin: 0 0 14px;
+  max-width: 62ch;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.empty-onboard-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .goal-panel {
   position: relative;
   display: flex;

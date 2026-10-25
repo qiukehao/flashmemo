@@ -1,5 +1,6 @@
 # 闪记 FlashMemo
 
+[![CI](https://github.com/qiukehao/flashmemo/actions/workflows/ci.yml/badge.svg)](https://github.com/qiukehao/flashmemo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg)](https://github.com/qiukehao/flashmemo)
 [![Built with Tauri 2](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB.svg)](https://v2.tauri.app/)
