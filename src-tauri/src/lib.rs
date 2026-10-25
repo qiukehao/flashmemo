@@ -356,6 +356,7 @@ pub fn run() {
             commands::frontend_log,
             commands::import_markdown,
             commands::import_sample_deck,
+            commands::export_markdown,
             commands::preview_import,
             commands::add_card,
             commands::list_overview,

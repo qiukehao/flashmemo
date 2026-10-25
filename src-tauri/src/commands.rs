@@ -3,7 +3,7 @@
 
 use crate::db::Db;
 use crate::import::ImportReport;
-use crate::services::{self, CardDto, DeckOverview, ImportFile, ImportPreview, ReviewSession};
+use crate::services::{self, CardDto, DeckOverview, ExportReport, ImportFile, ImportPreview, ReviewSession};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Manager, State};
@@ -243,6 +243,16 @@ pub fn preview_import(files: Vec<ImportFile>, db: DbState) -> Result<ImportPrevi
 #[tauri::command]
 pub fn import_sample_deck(db: DbState) -> Result<ImportReport, String> {
     services::import_sample_deck(&lock(&db))
+}
+
+/// Markdown 导出：`deck = None` 导出全部卡包。路径由前端保存对话框提供。
+#[tauri::command]
+pub fn export_markdown(
+    path: String,
+    deck: Option<String>,
+    db: DbState,
+) -> Result<ExportReport, String> {
+    services::export_markdown(&lock(&db), &path, deck.as_deref())
 }
 
 /// `front_md` is the optional 题面 (SPEC §5.2 rule 10, 需求7); omitting it keeps

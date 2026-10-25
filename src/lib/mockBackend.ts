@@ -245,6 +245,7 @@ const MUTATING = new Set([
   "import_markdown",
   "import_sample_deck",
   "get_autostart",
+  "export_markdown",
   "set_autostart",
   "add_card",
   "delete_card",
@@ -997,6 +998,12 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
         .filter(matchesFilter)
         .map(clone);
     }
+    case "export_markdown":
+      // 浏览器写不了盘：报告当前库规模，导出按钮本身在 UI 层已拦截提示。
+      return {
+        decks: new Set(cards.map((c) => c.deck)).size,
+        cards: cards.filter((c) => c.state !== "suspended").length,
+      };
     case "get_autostart":
       return mockAutostart;
     case "set_autostart":

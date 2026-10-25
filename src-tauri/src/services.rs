@@ -282,6 +282,92 @@ fn import_markdown_with_store(
     import::import(db, &decks, None, prefer_file).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportReport {
+    pub decks: u32,
+    pub cards: u32,
+}
+
+/// Markdown 导出（SPEC §5.6，2026-10-25）：纯函数编写器——与导入格式严格互逆，
+/// 导出的文件重新导入就是一次幂等更新（标题/题面/内容逐字段一致，见测试）。
+/// 题面卡以 `> [!question]` 标注块回写（SPEC §5.2 rule 13 的同一语法）。
+pub fn cards_markdown(cards: &[db::Card]) -> String {
+    let mut out = String::new();
+    let mut last_deck: Option<&str> = None;
+    let mut last_chapter: Option<&str> = None;
+    for c in cards {
+        // 按调用方排好的 (deck, chapter) 顺序输出标题层级。
+        if last_deck != Some(c.deck.as_str()) {
+            out.push_str(&format!("# {}\n\n", c.deck));
+            last_deck = Some(c.deck.as_str());
+            last_chapter = None;
+        }
+        if last_chapter != Some(c.chapter.as_str()) {
+            out.push_str(&format!("## {}\n\n", c.chapter));
+            last_chapter = Some(c.chapter.as_str());
+        }
+        out.push_str(&format!("### {}\n\n", c.title));
+        let front = c.front_md.trim();
+        if !front.is_empty() {
+            out.push_str("> [!question]\n");
+            for line in front.lines() {
+                if line.trim().is_empty() {
+                    out.push_str(">\n");
+                } else {
+                    out.push_str(&format!("> {line}\n"));
+                }
+            }
+            out.push('\n');
+        }
+        let content = c.content_md.trim();
+        if !content.is_empty() {
+            out.push_str(content);
+            if !content.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Export cards (optionally one deck) as Markdown to `path`. Soft-deleted
+/// (suspended) cards are excluded — they are deleted content; review progress
+/// is scheduling state, which a Markdown export deliberately does not carry.
+pub fn export_markdown(
+    db: &Db,
+    path: &str,
+    deck: Option<&str>,
+) -> Result<ExportReport, String> {
+    let overviews = list_overview(db)?;
+    let mut cards: Vec<db::Card> = Vec::new();
+    for o in &overviews {
+        if let Some(want) = deck {
+            if o.name != want {
+                continue;
+            }
+        }
+        // list_cards_by_deck 已按导入顺序（章节、id）返回。
+        for c in db.list_cards_by_deck(&o.name).map_err(|e| e.to_string())? {
+            if c.state != "suspended" {
+                cards.push(c);
+            }
+        }
+    }
+    let md = cards_markdown(&cards);
+    std::fs::write(path, md.as_bytes()).map_err(|e| format!("写入导出文件失败: {e}"))?;
+    let decks = cards
+        .iter()
+        .map(|c| c.deck.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32;
+    Ok(ExportReport {
+        decks,
+        cards: cards.len() as u32,
+    })
+}
+
 /// The bundled demo deck (first-run onboarding): the same import path as a
 /// user-picked file, so re-importing stays idempotent and local edits win.
 pub fn import_sample_deck(db: &Db) -> Result<ImportReport, String> {
@@ -1854,6 +1940,65 @@ mod tests {
             seq + 7,
             "抽查回炉的间距必须用用户配置，而不是默认 3"
         );
+    }
+
+    #[test]
+    fn export_markdown_round_trips_through_the_importer() {
+        let mut d = db();
+        let _ = add_card(&d, "MySQL", "事务", "ACID 是什么？", "- 原子性
+- 一致性");
+        let _ = add_card_with_front(
+            &d,
+            "MySQL",
+            "索引",
+            "为什么用 B+ 树？",
+            "磁盘 IO 更少",
+            "从树高与叶子链表两方面讲",
+        );
+        let _ = add_card(&d, "Redis", "缓存", "穿透与击穿？", "穿透＝不存在；击穿＝热点过期");
+        // 软删卡（用户删掉的）不导出。
+        let gone = add_card(&d, "Redis", "缓存", "已删除的卡", "x").unwrap();
+        let _ = delete_card(&d, gone.id);
+
+        let mut cards: Vec<crate::db::Card> = Vec::new();
+        for o in list_overview(&d).unwrap() {
+            for c in d.list_cards_by_deck(&o.name).unwrap() {
+                if c.state != "suspended" {
+                    cards.push(c);
+                }
+            }
+        }
+        let md = cards_markdown(&cards);
+        // 重新解析 → 与原库逐字段一致（幂等往返：导出文件再导入是 no-op）。
+        let parsed = parse_markdown(&md, "导出");
+        let mut d2 = db();
+        let report = import::import(&mut d2, &parsed, None, false).unwrap();
+        assert_eq!(report.added, 3, "{report:?}");
+        for (want_deck, want_ch, want_title) in [
+            ("MySQL", "事务", "ACID 是什么？"),
+            ("MySQL", "索引", "为什么用 B+ 树？"),
+            ("Redis", "缓存", "穿透与击穿？"),
+        ] {
+            let got = d2
+                .0
+                .query_row(
+                    "SELECT c.content_md, COALESCE(c.front_md,'') FROM card c
+                     JOIN chapter ch ON ch.id=c.chapter_id JOIN deck dk ON dk.id=ch.deck_id
+                     WHERE dk.name=?1 AND ch.name=?2 AND c.title=?3",
+                    rusqlite::params![want_deck, want_ch, want_title],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap();
+            let src = cards
+                .iter()
+                .find(|c| c.deck == want_deck && c.chapter == want_ch && c.title == want_title)
+                .unwrap();
+            assert_eq!(got.0, src.content_md, "{want_title} 背面往返");
+            assert_eq!(got.1, src.front_md, "{want_title} 题面往返");
+        }
+        // 题面卡确实以 [!question] 语法写出。
+        assert!(md.contains("> [!question]"));
+        assert!(md.contains("从树高与叶子链表两方面讲"));
     }
 
     #[test]

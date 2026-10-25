@@ -44,6 +44,9 @@ pub struct EngineSettings {
     /// 全屏免打扰 (SPEC §8, 2026-10-25): 前台应用全屏（游戏/视频/演示）时，
     /// 自动弹窗降级为轻提醒；手动触发不受影响。
     pub fullscreen_dnd: bool,
+    /// 组合提醒 (SPEC §8.1, 2026-10-25)：notify_mode = "combo" 时，轻提醒后
+    /// 这么多分钟仍未复习，升级为弹窗。
+    pub combo_escalate_min: u32,
 }
 
 impl Default for EngineSettings {
@@ -65,6 +68,7 @@ impl Default for EngineSettings {
             // 5 分钟：足够读完一张卡加批注，又不足以"拖到副屏放着不管"。
             popup_idle_escape_min: 5,
             fullscreen_dnd: true,
+            combo_escalate_min: 5,
         }
     }
 }
@@ -94,6 +98,8 @@ pub struct EngineState {
     /// 讲出型目标的**冻结值** `(学习日, 复习份额, 讲出率)`：只在学习日切换或用户
     /// 改目标时重算一次。时段内不更新——时段内更新等于追产出缺口，正是要避免的震荡。
     pub goal_freeze: Option<(String, i64, f64)>,
+    /// 组合提醒的起表时刻（第一声轻提醒发出时）；升级为弹窗或任何门槛失效即清空。
+    pub combo_since: Option<DateTime<Utc>>,
 }
 
 /// Events that wake the engine loop before the 15s timeout elapses.
@@ -144,6 +150,27 @@ pub fn mark_popup_activity(app: &tauri::AppHandle) {
 pub fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
     let (h, m) = s.split_once(':')?;
     Some((h.trim().parse().ok()?, m.trim().parse().ok()?))
+}
+
+/// 组合提醒的下一步（纯函数）：还没起表 → 先发轻提醒；起了表但没等满
+/// M 分钟 → 继续轻提醒（maybe_notify 自带节流，不会刷屏）；等满了 → 升级弹窗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComboStep {
+    Remind,
+    Escalate,
+}
+
+pub fn combo_step(since: Option<DateTime<Utc>>, now: DateTime<Utc>, escalate_min: u32) -> ComboStep {
+    match since {
+        None => ComboStep::Remind,
+        Some(t0) => {
+            if now - t0 >= chrono::Duration::minutes(i64::from(escalate_min.max(1))) {
+                ComboStep::Escalate
+            } else {
+                ComboStep::Remind
+            }
+        }
+    }
 }
 
 /// 全屏免打扰判定（纯函数）：设置开启 + 前台全屏 + 非手动触发三者同时成立
@@ -425,6 +452,10 @@ fn read_settings(db: &Db) -> EngineSettings {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5),
         fullscreen_dnd: get("fullscreen_dnd").map(|v| v.trim() != "0").unwrap_or(true),
+        combo_escalate_min: get("combo_escalate_min")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5)
+            .clamp(1, 60),
     }
 }
 
@@ -664,6 +695,42 @@ pub fn tick(
         maybe_notify(app, due, effective_interval, false, &mut st);
         return false;
     }
+    // 组合提醒（SPEC §8.1，2026-10-25）：轻提醒先到，M 分钟没人理才弹窗。
+    // 升级后落回下面的常规 Open 路径——全屏免打扰/学习延后/空池防护照常生效。
+    if settings.notify_mode == "combo" && !force {
+        if due == 0
+            || !in_study_hours(now_local, &settings)
+            || !not_paused(&settings, Utc::now())
+            || popup_on_screen
+            || daily_limit_reached(today_popups, settings.daily_popup_limit)
+        {
+            st.combo_since = None;
+            if due > 0 && daily_limit_reached(today_popups, settings.daily_popup_limit) {
+                maybe_notify(app, due, effective_interval, true, &mut st);
+            }
+            return false;
+        }
+        if !interval_elapsed(st.last_popup_at, effective_interval, Utc::now()) {
+            return false; // 还没到节奏点；已起的表保留，到点继续算
+        }
+        match combo_step(st.combo_since, Utc::now(), settings.combo_escalate_min) {
+            ComboStep::Remind => {
+                if st.combo_since.is_none() {
+                    log::debug!(
+                        "[engine] combo: light reminder out, escalation in {}min",
+                        settings.combo_escalate_min
+                    );
+                    st.combo_since = Some(Utc::now());
+                }
+                maybe_notify(app, due, effective_interval, false, &mut st);
+                return false;
+            }
+            ComboStep::Escalate => {
+                log::debug!("[engine] combo: unattended, escalating to popup");
+                st.combo_since = None;
+            }
+        }
+    }
     let input = DecisionInput {
         due_count: due,
         now: now_local,
@@ -742,6 +809,7 @@ pub fn tick(
             match open_popup(app, pos, false, "auto") {
                 Ok(_window) => {
                     st.last_popup_at = Some(Utc::now());
+                    st.combo_since = None;
                     if accelerate_now {
                         st.accel_popups_today += 1;
                     }
@@ -1507,6 +1575,26 @@ mod tests {
         let (x, y) = popup_position(portrait, POPUP_SIZE);
         assert!((x - (-1152.0 + (1152.0 - POPUP_SIZE.0) / 2.0)).abs() < 0.01);
         assert!((y - (-512.0 + (2048.0 - 48.0 - POPUP_SIZE.1) / 2.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn combo_step_reminds_then_escalates() {
+        let t0 = Utc::now();
+        assert_eq!(combo_step(None, t0, 5), ComboStep::Remind, "没起表 → 先轻提醒");
+        assert_eq!(
+            combo_step(Some(t0), t0 + chrono::Duration::minutes(4), 5),
+            ComboStep::Remind,
+            "未满 M 分钟 → 继续轻提醒"
+        );
+        assert_eq!(
+            combo_step(Some(t0), t0 + chrono::Duration::minutes(5), 5),
+            ComboStep::Escalate,
+            "满 M 分钟 → 升级弹窗"
+        );
+        assert_eq!(
+            combo_step(Some(t0), t0 + chrono::Duration::hours(2), 5),
+            ComboStep::Escalate
+        );
     }
 
     #[test]

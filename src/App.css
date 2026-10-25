@@ -1727,6 +1727,13 @@ textarea {
   font-size: 16px;
 }
 
+.decks-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 3px;
+}
+
 .decks-heading > .btn {
   margin-top: 3px;
 }

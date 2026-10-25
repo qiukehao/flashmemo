@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type CardDto, type CardLinks, type DeckOverview, errText } from "../lib/api";
 import EditContextMenu from "../components/EditContextMenu";
 import { copyText } from "../lib/dom";
+import { isTauri } from "../lib/env";
 import { insertPickedImage, pasteIntoCardEditor } from "../lib/imageInsert";
 import { attachNotePopover } from "../lib/notePopover";
 import { logFrontend } from "../lib/logger";
@@ -212,6 +213,26 @@ export default function DecksPage({
       }
       const n = await api.startReview(due.map((c) => c.id));
       flash(`已打开「${name}」复习弹窗（${n} 张到期卡）`);
+    } catch (e) {
+      setError(errText(e));
+    }
+  }
+
+  /** 导出全部卡包为 Markdown（浏览器调试模式无保存对话框，提示走桌面版）。 */
+  async function exportAll() {
+    if (!isTauri()) {
+      flash("浏览器调试模式不支持保存文件，请在桌面版导出");
+      return;
+    }
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      defaultPath: "闪记导出.md",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!path) return;
+    try {
+      const r = await api.exportMarkdown(path);
+      flash(`已导出 ${r.decks} 个卡包 · ${r.cards} 张卡`);
     } catch (e) {
       setError(errText(e));
     }
@@ -883,9 +904,14 @@ export default function DecksPage({
             {overview.length} 个卡包 · {overview.reduce((sum, item) => sum + item.cardCount, 0)} 张卡 · 今日到期 {overview.reduce((sum, item) => sum + item.dueCount, 0)}
           </p>
         </div>
-        <button className="btn primary" onClick={() => window.dispatchEvent(new CustomEvent("flashmemo:add-card"))}>
-          ＋ 添加卡片
-        </button>
+        <div className="decks-heading-actions">
+          <button className="btn" onClick={() => void exportAll()} title="把全部卡包导出为 Markdown（与导入格式互逆，可再导入恢复）">
+            导出 Markdown
+          </button>
+          <button className="btn primary" onClick={() => window.dispatchEvent(new CustomEvent("flashmemo:add-card"))}>
+            ＋ 添加卡片
+          </button>
+        </div>
       </div>
       <div className="toolbar">
         <input

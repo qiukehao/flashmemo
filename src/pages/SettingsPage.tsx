@@ -121,7 +121,13 @@ const FIELDS: {
     options: [
       { value: "popup", label: "强制弹窗" },
       { value: "notify", label: "仅轻提醒" },
+      { value: "combo", label: "先轻提醒，未处理再弹窗" },
     ],
+  },
+  {
+    key: "combo_escalate_min",
+    label: "升级弹窗等待（分钟）",
+    hint: "「先轻提醒」模式下，轻提醒后这么多分钟仍未复习就升级为弹窗；默认 5",
   },
   {
     key: "popup_idle_escape_min",
@@ -158,7 +164,7 @@ const FIELDS: {
 ];
 
 const GROUPS: { title: string; keys: string[] }[] = [
-  { title: "弹窗与学习时段", keys: ["autostart", "popup_interval_min", "per_popup", "study_start", "study_end", "notify_mode", "daily_popup_limit", "popup_idle_escape_min", "close_policy", "no_close_first_n", "fullscreen_dnd"] },
+  { title: "弹窗与学习时段", keys: ["autostart", "popup_interval_min", "per_popup", "study_start", "study_end", "notify_mode", "daily_popup_limit", "popup_idle_escape_min", "close_policy", "no_close_first_n", "fullscreen_dnd", "combo_escalate_min"] },
   { title: "间隔调度（隔 N 张）", keys: ["gap_unknown", "gap_familiar", "gap_speakable", "level_gaps"] },
   { title: "重点卡与时间保护", keys: ["attention_threshold", "attention_gap", "max_unknown_gap", "floor_unknown_min", "floor_familiar_min", "floor_speakable_min"] },
   { title: "每日上限与 AI", keys: ["daily_new_limit", "session_new_limit", "skip_delay_min"] },

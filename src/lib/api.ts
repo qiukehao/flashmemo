@@ -71,6 +71,11 @@ export interface ImportReport {
   keptMissing: number;
 }
 
+export interface ExportReport {
+  decks: number;
+  cards: number;
+}
+
 export interface ImportPreview {
   decks: number;
   chapters: number;
@@ -168,6 +173,9 @@ export const api = {
     invoke<ImportReport>("import_markdown", { files, preferFile }),
   /** 首启引导：导入内置示例卡包（幂等，本地编辑优先）。 */
   importSampleDeck: () => invoke<ImportReport>("import_sample_deck"),
+  /** Markdown 导出（与导入格式互逆；deck 省略 = 全部卡包）。 */
+  exportMarkdown: (path: string, deck?: string) =>
+    invoke<ExportReport>("export_markdown", { path, deck: deck ?? null }),
   /** 开机自启（系统启动项的实时状态，不是 KV）。 */
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
