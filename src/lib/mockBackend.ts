@@ -883,8 +883,20 @@ async function handleCommand(cmd: string, a: Record<string, unknown>): Promise<u
       return null;
     }
     case "rename_deck": {
+      // 镜像 services::rename_deck 的契约：空名/重名/包不存在都报中文错误，
+      // 否则浏览器调试模式会放行真机必然拒绝的操作（如把卡包改名成空串）。
+      const newName = String(a.newName ?? "").trim();
+      if (!newName) throw new Error("卡包名不能为空");
+      const oldName = String(a.oldName ?? "");
+      if (!cards.some((c) => c.deck === oldName)) throw new Error("卡包不存在");
+      if (newName !== oldName && cards.some((c) => c.deck === newName))
+        throw new Error("卡包名已存在");
       for (const c of cards) {
-        if (c.deck === a.oldName) c.deck = String(a.newName ?? c.deck);
+        if (c.deck === oldName) c.deck = newName;
+      }
+      if (oldName in deckChain) {
+        deckChain[newName] = deckChain[oldName];
+        delete deckChain[oldName];
       }
       return null;
     }
