@@ -1826,13 +1826,12 @@ mod tests {
     fn archived_spot_check_uses_user_configured_gaps() {
         let mut d = db();
         let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
-        d.0
-            .execute(
-                "UPDATE card SET state='archived', level=5, next_eligible_seq=0,
+        d.0.execute(
+            "UPDATE card SET state='archived', level=5, next_eligible_seq=0,
                  due_at='2000-01-01T00:00:00+00:00'",
-                [],
-            )
-            .unwrap();
+            [],
+        )
+        .unwrap();
         d.set_setting("gap_unknown", "7").unwrap();
         mark_shown(&d, dto.id).unwrap();
         let seq = d.show_count().unwrap();

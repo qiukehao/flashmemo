@@ -402,7 +402,6 @@ fn show_ai_window(app: &tauri::AppHandle, origin: &str) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(150));
         return create_ai_window(app, owner_label);
     }
-    let window = app.get_window(AI_WINDOW_LABEL).expect("checked above");
     let already_docked = app
         .try_state::<AiDock>()
         .and_then(|dock| {
