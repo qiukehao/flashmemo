@@ -30,11 +30,18 @@ impl SeqCache {
     }
 
     fn bump(&self) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                v.checked_add(1).filter(|n| *n >= 0)
-            });
+        // fetch_update 在新 Rust 被改名（try_update）——compare_exchange_weak 循环
+        // 在新旧版本都稳定，语义一致：+1，溢出/负值保持原值。
+        let mut cur = self.0.load(Ordering::Relaxed);
+        while let Some(next) = cur.checked_add(1).filter(|n| *n >= 0) {
+            match self
+                .0
+                .compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     fn invalidate(&self) {
