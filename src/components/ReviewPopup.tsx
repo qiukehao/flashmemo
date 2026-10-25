@@ -146,7 +146,13 @@ export default function ReviewPopup() {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPanel(null);
+      if (e.key === "Escape") {
+        // Esc 在这里只关浮层，且必须止住冒泡：评分热键把 Esc 映射成「跳过」，
+        // 而 React 同步 flush 后事件再冒泡到 window 时拿到的守卫已是新值。
+        e.preventDefault();
+        e.stopPropagation();
+        setPanel(null);
+      }
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -704,9 +710,9 @@ export default function ReviewPopup() {
       if (editMenuRef.current) return;
       // 图片预览打开时键盘归预览层（Esc 由它自己关闭），不能顺手评分/跳过。
       if (lightboxRef.current) return;
-      // 顶栏浮层（知识铺垫 / 关联卡片）盖着卡面、还带着遮罩：空格/1/2/3 必须让路，
-      // 否则用户在看前置卡时会「隔空」把当前卡评了。Esc 由浮层自己关。
-      if (panel === "links" || panel === "context") return;
+      // 顶栏浮层（排版 / 知识铺垫 / 关联卡片）开着时评分热键全部让路——包括 Esc。
+      // 挡「所有」浮层而不是枚举，避免以后新增面板又漏掉（2026-10-25 Esc 跳卡教训）。
+      if (panel) return;
       // The already-rated card offers a follow-up: Enter continues, Esc ends.
       if (pendingNext) {
         if (e.key === "Enter") {
