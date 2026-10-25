@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { TabKey } from "../lib/tabs";
-import { api, type DeckOverview } from "../lib/api";
+import { api, type DeckOverview, errText } from "../lib/api";
 import { insertPastedImageMarkdown, insertPickedImageMarkdown } from "../lib/imageInsert";
 import { renderCard } from "../lib/markdown";
 
@@ -64,7 +64,7 @@ export default function AddCardPage({
       setContent("");
       onSaved("add");
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 

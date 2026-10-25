@@ -4,6 +4,7 @@ import type { TabKey } from "../lib/tabs";
 import { isTauri } from "../lib/env";
 import {
   api,
+  errText,
   type DeckOverview,
   type ImportFile,
   type ImportPreview,
@@ -98,7 +99,7 @@ export default function ImportPage({
       setFiles(parsed);
       setPreview(await api.previewImport(parsed));
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -114,7 +115,7 @@ export default function ImportPage({
       setReport(await api.importMarkdown(batch, preferFile));
       setPreview(null);
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     } finally {
       setBusy(false);
     }

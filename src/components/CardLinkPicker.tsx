@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type CardDto, type CardLinks } from "../lib/api";
+import { api, type CardDto, type CardLinks, errText } from "../lib/api";
 
 /**
  * 共享的「链接卡片选择器」（SPEC §11.1）：主窗口卡片编辑器与复习弹窗用同一套
@@ -129,7 +129,7 @@ export default function CardLinkPicker({
     try {
       onLinks(await api.getCardLinks(cardId));
     } catch (e) {
-      setMsg(String(e));
+      setMsg(errText(e));
     }
   }, [cardId, onLinks]);
 
@@ -143,7 +143,7 @@ export default function CardLinkPicker({
         await refresh();
         setPendingRemove(null);
       } catch (e) {
-        setMsg(String(e));
+        setMsg(errText(e));
       } finally {
         setBusy(false);
       }
@@ -169,7 +169,7 @@ export default function CardLinkPicker({
         setResults([]);
         if (compact) setOpen(false);
       } catch (e) {
-        setMsg(String(e));
+        setMsg(errText(e));
       } finally {
         setBusy(false);
       }
@@ -371,7 +371,7 @@ export function NextLinkActions({
       setConfirming(false);
       onRemoved();
     } catch (e) {
-      setMsg(String(e));
+      setMsg(errText(e));
     } finally {
       setBusy(false);
     }

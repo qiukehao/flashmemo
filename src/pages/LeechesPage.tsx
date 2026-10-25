@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type CardDto } from "../lib/api";
+import { api, type CardDto, errText } from "../lib/api";
 
 const LEVEL_NAMES = ["新卡", "刚接触", "能回忆", "基本熟练", "长期维护", "长期维护"];
 
@@ -13,7 +13,7 @@ export default function LeechesPage({ onBack }: { onBack: () => void }) {
     api
       .listAttentionCards()
       .then(setCards)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errText(e)));
   }, []);
 
   useEffect(load, [load]);
@@ -24,7 +24,7 @@ export default function LeechesPage({ onBack }: { onBack: () => void }) {
       setMsg(`已解除「${card.title}」的重点标记`);
       load();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -35,7 +35,7 @@ export default function LeechesPage({ onBack }: { onBack: () => void }) {
       setMsg(`已重置「${card.title}」`);
       load();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type ActivityStatus } from "../lib/api";
+import { api, type ActivityStatus, errText } from "../lib/api";
 
 interface ActivityRule {
   kind: "exe" | "title";
@@ -178,7 +178,7 @@ export default function SettingsPage() {
       const path = await api.backupNow();
       setBackupMsg(`已备份：${path}`);
     } catch (e) {
-      setBackupMsg(String(e));
+      setBackupMsg(errText(e));
     }
   }
 
@@ -210,7 +210,7 @@ export default function SettingsPage() {
       });
       setMsg("已保存");
     } catch (e) {
-      setMsg(String(e));
+      setMsg(errText(e));
     }
   }
 

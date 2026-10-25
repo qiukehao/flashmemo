@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type DeckOverview } from "../lib/api";
+import { api, type DeckOverview, errText } from "../lib/api";
 
 interface PartRow {
   deck: string;
@@ -50,7 +50,7 @@ export default function ExamComposer({ onClose }: { onClose: () => void }) {
       await api.composeExam(rows, includeDue, strategy);
       onClose();
     } catch (e) {
-      setMsg(String(e));
+      setMsg(errText(e));
     } finally {
       setBusy(false);
     }
@@ -71,7 +71,7 @@ export default function ExamComposer({ onClose }: { onClose: () => void }) {
       setPresetName("");
       await loadPresets();
     } catch (e) {
-      setMsg(String(e));
+      setMsg(errText(e));
     }
   }
 

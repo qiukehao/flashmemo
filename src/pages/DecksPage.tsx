@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CardDto, type CardLinks, type DeckOverview } from "../lib/api";
+import { api, type CardDto, type CardLinks, type DeckOverview, errText } from "../lib/api";
 import EditContextMenu from "../components/EditContextMenu";
 import { copyText } from "../lib/dom";
 import { insertPickedImage, pasteIntoCardEditor } from "../lib/imageInsert";
@@ -124,7 +124,7 @@ export default function DecksPage({
     api
       .listOverview()
       .then(setOverview)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errText(e)));
   }, []);
 
   useEffect(loadOverview, [loadOverview]);
@@ -139,7 +139,7 @@ export default function DecksPage({
       api
         .searchCards(query.trim() || null, null, filter)
         .then(setResults)
-        .catch((e) => setError(String(e)));
+        .catch((e) => setError(errText(e)));
     }, 250);
     return () => clearTimeout(t);
   }, [query, filter, flatMode]);
@@ -154,7 +154,7 @@ export default function DecksPage({
       if (loaded.length > 0) startEdit(loaded[0]);
       else setEditing(null);
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -198,7 +198,7 @@ export default function DecksPage({
       flash(`已打开复习弹窗（${n} 张）`);
       setSelection(new Set());
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -213,7 +213,7 @@ export default function DecksPage({
       const n = await api.startReview(due.map((c) => c.id));
       flash(`已打开「${name}」复习弹窗（${n} 张到期卡）`);
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -226,7 +226,7 @@ export default function DecksPage({
       loadOverview();
       if (openDeck === oldName) setOpenDeck(renameValue);
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -239,7 +239,7 @@ export default function DecksPage({
       if (openDeck === name) setOpenDeck(null);
       loadOverview();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -250,7 +250,7 @@ export default function DecksPage({
       flash("卡片已删除");
       refreshCurrent();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -507,7 +507,7 @@ export default function DecksPage({
         onCardOpened?.();
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setError(errText(e));
       });
     return () => {
       cancelled = true;
@@ -543,7 +543,7 @@ export default function DecksPage({
       setLinkQuery("");
       setLinkResults([]);
     } catch (e) {
-      setLinkMsg(String(e));
+      setLinkMsg(errText(e));
     }
   }
 
@@ -554,7 +554,7 @@ export default function DecksPage({
       await api.removeCardLink(from, to);
       setLinks(await api.getCardLinks(editing));
     } catch (e) {
-      setLinkMsg(String(e));
+      setLinkMsg(errText(e));
     }
   }
 
@@ -566,7 +566,7 @@ export default function DecksPage({
       flash(`「${o.name}」顺序串联已${o.chainByOrder ? "关闭" : "开启"}`);
       loadOverview();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -590,7 +590,7 @@ export default function DecksPage({
         refreshCurrent();
       }
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
@@ -612,7 +612,7 @@ export default function DecksPage({
       flash(`「${card.title}」已恢复到复习队列`);
       refreshCurrent();
     } catch (e) {
-      setError(String(e));
+      setError(errText(e));
     }
   }
 
