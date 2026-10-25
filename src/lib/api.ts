@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** 展示层统一的错误转文案：Tauri invoke 的 reject 是裸字符串（Rust 返回值），
+ *  mock 抛的是 Error 实例——直接 String() 会让用户看到 "Error: " 前缀。 */
+export function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 export interface CardDto {
   id: number;
   deck: string;
@@ -240,9 +246,10 @@ export const api = {
   aiWindowShow: (origin: "main" | "popup") =>
     invoke<void>("ai_window_show", { origin }),
   /** 由 AI 窗口页面调用：把站点 webview 钉进窗口内的布局槽。同站点重复调用
-   *  只校正位置、不重新导航 —— 隐藏再打开时对话还在。 */
-  aiWindowAttach: (url: string, x: number, y: number, w: number, h: number) =>
-    invoke<void>("ai_window_attach", { url, x, y, w, h }),
+   *  只校正位置、不重新导航 —— 隐藏再打开时对话还在；force=true（网址栏显式
+   *  「打开」）连同源不同路径也真的导航。 */
+  aiWindowAttach: (url: string, x: number, y: number, w: number, h: number, force?: boolean) =>
+    invoke<void>("ai_window_attach", { url, x, y, w, h, force: force ?? false }),
   aiWindowResize: (x: number, y: number, w: number, h: number) =>
     invoke<void>("ai_window_resize", { x, y, w, h }),
   /** 隐藏（不是销毁）：站点页面继续活着，对话因此得以保留。 */

@@ -11,7 +11,13 @@ import { isTauri } from "./env";
  */
 export async function fillAiQuestion(text: string): Promise<void> {
   if (!isTauri()) return;
-  for (const delay of [250, 700, 1400]) {
+  // 先等「打开窗口」落地，再开始重试：旧版两件事并发，窗口创建 + 宿主页
+  // 加载 + 子 WebView 冷启动轻松超过 2.3 秒，三次重试全部落空——首开必
+  // 静默失败（ai_fill_question 对未建好的子 webview 返回错误）。
+  await api.aiWindowShow("popup").catch(() => {});
+  // 总窗口 ~12.6s：覆盖子 WebView 冷启动；注入脚本自身还会再轮询 ~8.4s
+  // 等站点输入框渲染，两条轮询相加足以跨过首次打开的全部延迟。
+  for (const delay of [250, 500, 800, 1200, 1600, 2000, 2500, 3500]) {
     await new Promise((resolve) => window.setTimeout(resolve, delay));
     const ok = await api
       .aiFillQuestion(text)

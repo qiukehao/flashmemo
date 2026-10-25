@@ -238,13 +238,25 @@ fn panel_visible_rect(window: &tauri::Window) -> Option<PhysRect> {
 /// area and never shorter than `min_height`. Pure function so the geometry can
 /// be unit tested without a window.
 fn dock_visible_rect(owner: PhysRect, work: PhysRect, width: i32, min_height: i32) -> PhysRect {
-    let w = width.clamp(1, work.w.max(1));
+    // 两侧都放不下请求宽度时，收缩面板而不是压在卡面上：评分按钮和顶栏必须
+    // 永远可点（弹窗与 AI 面板都置顶，重叠时两者互相翻 z 序，按钮"时有时无"）。
+    // 收缩只影响本次几何，不写回持久化宽度。
+    const MIN_DOCK_WIDTH: i32 = 240;
+    let right_avail = work.right() - owner.right();
+    let left_avail = owner.x - work.x;
+    let w = if right_avail >= width || left_avail >= width {
+        width.clamp(1, work.w.max(1))
+    } else {
+        width
+            .min(right_avail.max(left_avail).max(MIN_DOCK_WIDTH))
+            .clamp(1, work.w.max(1))
+    };
     let mut x = owner.right();
     if x + w > work.right() {
         x = owner.x - w; // no room on the right: dock flush on the left
     }
     if x < work.x || x + w > work.right() {
-        x = (work.right() - w).max(work.x); // narrower than the panel: clamp inside
+        x = (work.right() - w).max(work.x); // degenerate geometry: clamp inside
     }
     let y = owner.y.max(work.y);
     let h = owner
@@ -398,19 +410,37 @@ fn show_ai_window(app: &tauri::AppHandle, origin: &str) -> Result<(), String> {
             Some(owner.as_deref() == Some(owner_label))
         })
         .unwrap_or(false);
+    // 焦点归复习流程：从弹窗打开 AI 不抢焦点——弹窗的评分热键（空格/1/2/3）
+    // 必须继续工作，用户想打字时自己点进 AI 面板即可。主窗口打开才给焦点。
+    let focus = origin != "popup";
+    let window = app.get_window(AI_WINDOW_LABEL).expect("checked above");
+    apply_topmost_for_origin(&window, origin);
     if window.is_visible().unwrap_or(false) {
         // Same owner → keep the user's placement; different owner → re-dock.
         if !already_docked {
             place_at_dock(app, &window, dock_rect(app, owner_label));
         }
-        let _ = window.set_focus();
+        if focus {
+            let _ = window.set_focus();
+        }
         return Ok(());
     }
     place_at_dock(app, &window, dock_rect(app, owner_label));
     let _ = window.unminimize();
     let _ = window.show();
-    let _ = window.set_focus();
+    if focus {
+        let _ = window.set_focus();
+    }
     Ok(())
+}
+
+/// 置顶与任务栏随宿主走：贴着弹窗（本就置顶）时置顶、无任务栏；贴着主窗口
+/// 时做个普通窗口——否则它是屏上唯一的置顶窗，切去别的应用还会盖在人家上面，
+/// 而且 alt-tab 里找不到它（用户反馈"很奇怪"的一部分）。
+fn apply_topmost_for_origin(window: &tauri::Window, origin: &str) {
+    let with_popup = origin == "popup";
+    let _ = window.set_always_on_top(with_popup);
+    let _ = window.set_skip_taskbar(with_popup);
 }
 
 /// Create the AI window (hidden, frameless — the in-page head is the title
@@ -455,9 +485,12 @@ fn create_ai_window(app: &tauri::AppHandle, owner_label: &str) -> Result<(), Str
     // WebviewWindow, and place_at_dock is shared with the watcher).
     if let Some(window) = app.get_window(AI_WINDOW_LABEL) {
         place_at_dock(app, &window, dock_rect(app, owner_label));
+        apply_topmost_for_origin(&window, owner_label);
         let _ = window.show();
         let _ = window.unminimize();
-        let _ = window.set_focus();
+        if owner_label != "popup" {
+            let _ = window.set_focus();
+        }
     }
     Ok(())
 }
@@ -474,14 +507,18 @@ pub async fn ai_window_attach(
     y: f64,
     w: f64,
     h: f64,
+    force: Option<bool>,
 ) -> Result<(), String> {
     let parsed = parse_url(&url)?;
     app.get_window(AI_WINDOW_LABEL).ok_or("AI 窗口尚未创建")?;
     if let Some(webview) = app.get_webview(SIDEBAR_LABEL) {
-        // Same site → keep the page (and the conversation) exactly as it is.
+        // Same site → keep the page (and the conversation) exactly as it is…
+        // unless the user explicitly typed this URL (网址栏「打开」)：同源不同
+        // 路径也必须真的导航，否则点了「打开」纹丝不动还清了报错。
+        let explicit = force.unwrap_or(false);
         if webview
             .url()
-            .map(|u| u.origin() != parsed.origin())
+            .map(|u| explicit || u.origin() != parsed.origin())
             .unwrap_or(true)
         {
             webview.navigate(parsed).map_err(|e| e.to_string())?;
@@ -699,16 +736,26 @@ pub fn fill_script(text: &str) -> String {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
       setter.call(el, text);
       try { el.selectionStart = el.selectionEnd = text.length; } catch (e) {}
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-      el.textContent = text;
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      sel.removeAllRanges();
-      sel.addRange(range);
+      // ProseMirror/Draft 类编辑器（ChatGPT/豆包）不认裸 textContent 赋值：
+      // 内部状态不同步、多行被挤成一行。execCommand('insertText') 走浏览器
+      // 编辑管线，编辑器自己收到 isTrusted 的 input 事件，多行原样保留。
+      el.focus();
+      let ok = false;
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        ok = document.execCommand('insertText', false, text);
+      } catch (e) { ok = false; }
+      if (!ok) el.textContent = text;
+      try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      } catch (e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
     }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
     el.focus();
   };
   let tries = 0;
@@ -795,9 +842,43 @@ mod tests {
             h: 2000,   // 还比工作区高
         };
         let docked = dock_visible_rect(owner, WORK, 500, 420);
-        assert_eq!(docked.x, WORK.right() - 500);
+        // 收缩到保底 240 而不是 500 宽压在卡面上（几何退化时的钳制路径）。
+        assert_eq!(docked.w, 240);
+        assert_eq!(docked.x, WORK.right() - 240);
         assert_eq!(docked.h, WORK.h);
         assert!(docked.bottom() <= WORK.bottom());
+    }
+
+    #[test]
+    fn shrinks_to_the_wider_side_instead_of_covering_the_card() {
+        // 右侧剩 360、左侧剩 300，请求 500：两侧都不够 → 收成 360 贴右缘，
+        // 面板绝不压在卡面上（旧实现会钳成 500 宽直接盖上去）。
+        let owner = PhysRect {
+            x: 300,
+            y: 0,
+            w: 1900,
+            h: 800,
+        };
+        assert_eq!(owner.right(), 2200);
+        assert_eq!(WORK.right() - owner.right(), 360, "预置条件：右侧 360");
+        assert_eq!(owner.x - WORK.x, 300, "预置条件：左侧 300");
+        let docked = dock_visible_rect(owner, WORK, 500, 420);
+        assert_eq!(docked.w, 360, "两侧都不够请求宽 → 收缩到较大一侧");
+        assert_eq!(docked.x, owner.right());
+    }
+
+    #[test]
+    fn keeps_the_full_width_when_one_side_fits() {
+        // 右侧充足：请求宽原样保留（回归保护：收缩逻辑不许误伤常态）。
+        let owner = PhysRect {
+            x: 100,
+            y: 40,
+            w: 900,
+            h: 700,
+        };
+        let docked = dock_visible_rect(owner, WORK, 500, 420);
+        assert_eq!(docked.w, 500);
+        assert_eq!(docked.x, owner.right());
     }
 
     #[test]

@@ -20,8 +20,12 @@ export default function AiWindowPage() {
   const [urlDraft, setUrlDraft] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 首开有 1–2s 的子 WebView 冷启动：给个明确的加载占位，而不是一块死灰板。
+  const [attaching, setAttaching] = useState(true);
   const slotRef = useRef<HTMLDivElement | null>(null);
   const openedUrl = useRef<string | null>(null);
+  // 网址栏「打开」按下时置位：下一次 attach 必须真的导航（同源不同路径也算）。
+  const pendingForce = useRef(false);
 
   useEffect(() => {
     api
@@ -64,9 +68,14 @@ export default function AiWindowPage() {
           `ai window attach: url=${active.url} rect=${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`,
         );
         void api
-          .aiWindowAttach(active.url, r.x, r.y, r.width, r.height)
+          .aiWindowAttach(active.url, r.x, r.y, r.width, r.height, pendingForce.current)
           .catch(() => {
             setLoadError("AI 网页打开失败，请检查网络或更换网址");
+          })
+          .finally(() => {
+            pendingForce.current = false;
+            // 子 WebView 已就位（导航与加载在原生层继续）：撤掉加载占位。
+            setAttaching(false);
           });
         return;
       }
@@ -102,6 +111,7 @@ export default function AiWindowPage() {
   function applyUrl() {
     const url = urlDraft.trim();
     if (!url) return;
+    pendingForce.current = true;
     const preset = AI_PRESETS.findIndex((p) => p.url === url);
     if (preset >= 0) {
       switchSite(preset);
@@ -164,6 +174,12 @@ export default function AiWindowPage() {
         </button>
       </div>
       <div className="ai-webview-slot" ref={slotRef}>
+        {attaching && isTauri() && !loadError && (
+          <div className="ai-loading muted small" role="status">
+            <span className="ai-loading-dot" aria-hidden="true" />
+            正在打开 {active?.name ?? "AI"} 站点…
+          </div>
+        )}
         {loadError && isTauri() && (
           <div className="muted small ai-mock-hint">{loadError}</div>
         )}

@@ -103,6 +103,7 @@ describe("AI 窗口的 attach / resize 通道", () => {
       slotRect.y,
       slotRect.width,
       slotRect.height,
+      false, // 初次挂载不强制导航：恢复上次对话靠 origin 比较
     );
     const ro = FakeResizeObserver.instances[FakeResizeObserver.instances.length - 1]!;
     await act(async () => {
