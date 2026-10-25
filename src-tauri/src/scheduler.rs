@@ -127,13 +127,17 @@ fn next_state(
             } else {
                 card.level.saturating_sub(1)
             };
-            if unknown_streak >= 4 {
-                // Repeating the same card faster does not build memory: back off
-                // further instead of hammering.
-                gap = cfg.max_unknown_gap;
-            } else if unknown_streak >= cfg.attention_threshold {
-                gap = cfg.attention_gap;
+            // 阶梯必须单调：先到阈值（标记 ⚠ + 回访距离），再超过一步才退避。
+            // 旧写法把退避硬编码在 streak>=4，阈值调大后会出现"标记了反而更近"。
+            if unknown_streak >= cfg.attention_threshold {
                 needs_attention = true;
+                gap = if unknown_streak > cfg.attention_threshold {
+                    // Repeating the same card faster does not build memory: back
+                    // off further instead of hammering.
+                    cfg.max_unknown_gap
+                } else {
+                    cfg.attention_gap
+                };
             } else {
                 gap = cfg.gap_unknown;
             }
@@ -523,6 +527,33 @@ mod tests {
         // Time passed but sequence not reached.
         assert!(!is_eligible(&card, 103, now - Duration::minutes(5), now));
         assert!(is_eligible(&card, 104, now - Duration::minutes(5), now));
+    }
+
+    #[test]
+    fn unknown_ladder_stays_monotonic_for_custom_thresholds() {
+        let now = Utc::now();
+        let mut c = cfg();
+        c.attention_threshold = 6;
+        let mut card = new_card();
+        let mut gaps = Vec::new();
+        let mut flagged_at = None;
+        for step in 1..=8u32 {
+            let out = review(&card, Rating::Unknown, 100, now, &c);
+            gaps.push(out.next_eligible_seq - 100);
+            if out.needs_attention && flagged_at.is_none() {
+                flagged_at = Some(step);
+            }
+            card.unknown_streak = out.unknown_streak;
+        }
+        for w in gaps.windows(2) {
+            assert!(w[1] >= w[0], "间距阶梯倒挂: {gaps:?}");
+        }
+        assert_eq!(flagged_at, Some(6), "标记必须正好落在阈值那一击");
+        assert_eq!(
+            gaps,
+            vec![3, 3, 3, 3, 3, 5, 10, 10],
+            "阈值前 gap_unknown，阈值当拍 attention_gap，再往后退避"
+        );
     }
 
     #[test]

@@ -1109,7 +1109,19 @@ pub fn listen_force_review(app: &tauri::AppHandle, state: std::sync::Arc<Mutex<E
                     // A minimized popup counts as visible; restore it too.
                     let _ = w.unminimize();
                     let _ = w.set_focus();
-                    if let Err(e) = signal_popup_session(&w, next_session_id()) {
+                    // 弹窗已在屏上的「立即复习」同样是一次新会话：不记账的话这个
+                    // 幽灵会话的结局上报（report_popup_session）找不到行，逃避链
+                    // 与每日上限都统计不到它。
+                    let session_id = next_session_id();
+                    record_popup(&handle, session_id, "manual");
+                    if let Some(shared) = handle.try_state::<EngineShared>() {
+                        shared.popup_session_id.store(session_id, Ordering::Relaxed);
+                        shared.popup_idle_marked.store(0, Ordering::Relaxed);
+                        shared
+                            .popup_activity_at
+                            .store(Utc::now().timestamp(), Ordering::Relaxed);
+                    }
+                    if let Err(e) = signal_popup_session(&w, session_id) {
                         log::error!("[review] failed to refresh popup session: {e}");
                     }
                 }

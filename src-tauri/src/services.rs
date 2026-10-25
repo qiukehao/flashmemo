@@ -1334,7 +1334,9 @@ fn rate_archived(
     seq: u64,
     now: chrono::DateTime<Utc>,
 ) -> Result<CardDto, String> {
-    let cfg = ScheduleConfig::default();
+    // 用户自定义的间隔配置对抽查回炉同样生效（原先误用默认值，自定义
+    // gap_unknown 的用户会看到抽查卡按 3 张回来）。
+    let cfg = cfg_from_db(db);
     let today = db::study_day_of(now);
     let out = scheduler::review(&to_sched(card, &today), r, seq, now, &cfg);
     let (next_state, level, spot_bias, due_at) = match r {
@@ -1818,6 +1820,30 @@ mod tests {
         let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
         assert_eq!(card(&d, dto.id).unwrap().title, "ACID?");
         assert_eq!(card(&d, 4_096).unwrap_err(), "卡片不存在");
+    }
+
+    #[test]
+    fn archived_spot_check_uses_user_configured_gaps() {
+        let mut d = db();
+        let dto = add_card(&d, "MySQL", "事务", "ACID?", "要点").unwrap();
+        d.0
+            .execute(
+                "UPDATE card SET state='archived', level=5, next_eligible_seq=0,
+                 due_at='2000-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+        d.set_setting("gap_unknown", "7").unwrap();
+        mark_shown(&d, dto.id).unwrap();
+        let seq = d.show_count().unwrap();
+        let after = rate(&mut d, dto.id, "unknown", None).unwrap();
+        assert_eq!(after.state, "review", "不了解 → 出归档回炉");
+        let raw = d.get_card(dto.id).unwrap().unwrap();
+        assert_eq!(
+            raw.next_eligible_seq,
+            seq + 7,
+            "抽查回炉的间距必须用用户配置，而不是默认 3"
+        );
     }
 
     #[test]
