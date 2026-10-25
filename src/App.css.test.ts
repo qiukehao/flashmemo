@@ -304,6 +304,20 @@ describe("关联卡片选择器样式（需求 2 / SPEC §11.1）", () => {
 });
 
 
+// 暗色主题（2026-10-25）：token 必须成套出现，否则深色模式会漏出浅色表面。
+describe("暗色主题 token（SPEC §16）", () => {
+  it("html.dark 定义了整套核心 token", () => {
+    for (const prop of ["--canvas", "--surface", "--ink", "--muted-ink", "--line", "--shadow", "color-scheme"]) {
+      expect(valueOf("html.dark", prop), `html.dark 缺 ${prop}`).toBeTruthy();
+    }
+  });
+
+  it("深色画布与墨色确实与浅色不同", () => {
+    expect(valueOf("html.dark", "--canvas")).not.toBe(valueOf(":root", "--canvas"));
+    expect(valueOf("html.dark", "--ink")).not.toBe(valueOf(":root", "--ink"));
+  });
+});
+
 // ---------------------------------------------------------------- 2026-10-07 批量反馈
 describe("2026-10-07 反馈修复的样式契约", () => {
   /** 表格规则是逗号长选择器列表，按「选择器串里包含目标」查找其声明。 */

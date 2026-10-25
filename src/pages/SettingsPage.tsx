@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ActivityStatus, errText } from "../lib/api";
+import { applyTheme, themeMode } from "../lib/theme";
 
 interface ActivityRule {
   kind: "exe" | "title";
@@ -107,6 +108,16 @@ const FIELDS: {
     hint: "默认 40；0 = 不限。超过后当天只保留轻提醒（系统通知）",
   },
   {
+    key: "theme_mode",
+    label: "主题",
+    hint: "跟随系统自动切换明暗，或手动锁定",
+    options: [
+      { value: "system", label: "跟随系统（默认）" },
+      { value: "light", label: "浅色" },
+      { value: "dark", label: "深色" },
+    ],
+  },
+  {
     key: "autostart",
     label: "开机自启",
     hint: "开机自动驻留托盘（系统启动项，改动即时生效）",
@@ -164,6 +175,7 @@ const FIELDS: {
 ];
 
 const GROUPS: { title: string; keys: string[] }[] = [
+  { title: "外观", keys: ["theme_mode"] },
   { title: "弹窗与学习时段", keys: ["autostart", "popup_interval_min", "per_popup", "study_start", "study_end", "notify_mode", "daily_popup_limit", "popup_idle_escape_min", "close_policy", "no_close_first_n", "fullscreen_dnd", "combo_escalate_min"] },
   { title: "间隔调度（隔 N 张）", keys: ["gap_unknown", "gap_familiar", "gap_speakable", "level_gaps"] },
   { title: "重点卡与时间保护", keys: ["attention_threshold", "attention_gap", "max_unknown_gap", "floor_unknown_min", "floor_familiar_min", "floor_speakable_min"] },
@@ -180,6 +192,8 @@ export default function SettingsPage() {
   // 开机自启是系统级开关：读真实状态展示，改动即时生效（不等「保存设置」）。
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartMsg, setAutostartMsg] = useState("");
+  // 主题即时生效（不占 values/保存按钮：视觉开关延迟生效只会让人以为坏了）。
+  const [themeMsg, setThemeMsg] = useState("");
 
   useEffect(() => {
     api
@@ -297,7 +311,29 @@ export default function SettingsPage() {
                     <label title={f.hint}>{f.label}</label>
                     {f.hint && <span className="muted small">{f.hint}</span>}
                   </div>
-                  {f.key === "autostart" ? (
+                  {f.key === "theme_mode" ? (
+                    <div className="autostart-cell">
+                      <select
+                        value={themeMode()}
+                        onChange={(e) => {
+                          applyTheme(e.target.value);
+                          setThemeMsg(
+                            e.target.value === "dark"
+                              ? "已切换到深色"
+                              : e.target.value === "light"
+                                ? "已切换到浅色"
+                                : "跟随系统",
+                          );
+                          void api.setSettings({ theme_mode: e.target.value }).catch(() => {});
+                        }}
+                      >
+                        <option value="system">跟随系统（默认）</option>
+                        <option value="light">浅色</option>
+                        <option value="dark">深色</option>
+                      </select>
+                      {themeMsg && <span className="ok small">{themeMsg}</span>}
+                    </div>
+                  ) : f.key === "autostart" ? (
                     <div className="autostart-cell">
                       <select
                         value={autostartOn ? "1" : "0"}

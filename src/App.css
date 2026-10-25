@@ -3676,3 +3676,267 @@ textarea {
   color: #ffffff;
   background: rgba(239, 68, 68, 0.6);
 }
+
+/* ---------- 暗色主题（SPEC §16，2026-10-25） ----------
+   浅色仍是默认；html.dark 时 token 整体翻转 + 硬编码的浅色表面在此收口。
+   品牌渐变、图表强调色、评分三档配色两种主题共用——它们本来就够亮。 */
+html.dark {
+  --canvas: #0f1219;
+  --surface: rgba(24, 28, 37, 0.92);
+  --surface-solid: #161a22;
+  --ink: #e8eaf0;
+  --muted-ink: #98a1b3;
+  --line: #262c38;
+  --line-strong: #39415455;
+  --shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+html.dark body {
+  color: var(--ink);
+  background: var(--canvas);
+}
+
+html.dark .shell {
+  background:
+    radial-gradient(circle at 4% 0%, rgba(91, 108, 255, 0.08), transparent 28%),
+    var(--canvas);
+}
+
+html.dark .shell-nav {
+  background: rgba(21, 25, 33, 0.92);
+  border-color: #2a3140;
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.35);
+}
+
+html.dark .shell-tabs {
+  background: #1d222d;
+}
+
+html.dark .shell-tab {
+  color: #9aa3b5;
+}
+
+html.dark .shell-tab:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+html.dark .btn {
+  color: #cfd6e4;
+  background: rgba(30, 35, 46, 0.9);
+  border-color: #39415455;
+}
+
+html.dark .btn:hover {
+  color: #fff;
+  background: #2a3140;
+  border-color: #4a5570;
+}
+
+/* 卡片表面：token 已翻转背景，这里只收边框与文字。 */
+html.dark .stat-card,
+html.dark .chart-block,
+html.dark .card-block,
+html.dark .settings-card,
+html.dark .backup-card {
+  border-color: #2a3140;
+}
+
+html.dark .stat-card:nth-child(2) {
+  border-color: #6f80f7;
+}
+
+html.dark .stat-label,
+html.dark .level-name,
+html.dark .week-count,
+html.dark .week-label,
+html.dark .settings-label label,
+html.dark .deck-chapter-title {
+  color: #c3cad8;
+}
+
+html.dark .stat-num {
+  color: #f2f4f8;
+}
+
+html.dark .deck-name {
+  color: var(--ink);
+}
+
+html.dark .card-title-cell {
+  color: #d6dce8;
+}
+
+/* 工具栏与筛选 */
+html.dark .page > .toolbar .search-input {
+  background: rgba(24, 28, 37, 0.9);
+  border-color: #39415455;
+  color: var(--ink);
+}
+
+html.dark .page > .toolbar select,
+html.dark .filter-pill,
+html.dark .settings-row input,
+html.dark .settings-row select,
+html.dark .ai-window-head select,
+html.dark .ai-sidebar-url input {
+  background: #1d222d;
+  border-color: #39415455;
+  color: var(--ink);
+}
+
+html.dark .filter-pill {
+  color: #9aa3b5;
+}
+
+html.dark .filter-pill:hover {
+  color: var(--ink);
+  background: #262d3b;
+}
+
+/* 菜单与浮层 */
+html.dark .new-menu,
+html.dark .typo-popover,
+html.dark .note-popover {
+  background: #1d232e;
+  border-color: #2f3746;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+}
+
+html.dark .new-menu-item {
+  color: var(--ink);
+}
+
+html.dark .new-menu-item:hover {
+  background: #262d3b;
+}
+
+html.dark .goal-panel {
+  background: linear-gradient(120deg, #1a2030, #171b24 62%);
+  border-color: #2a3140;
+}
+
+html.dark .goal-icon {
+  background: #232b45;
+}
+
+html.dark .empty-onboard {
+  background: linear-gradient(120deg, #1a2030, #171b24 62%);
+  border-color: #2e3752;
+}
+
+/* 复习弹窗 */
+html.dark .popup-root {
+  background: rgba(22, 26, 34, 0.97);
+  border-color: #2a3140;
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.55);
+}
+
+html.dark .popup-header {
+  color: #9aa3b5;
+}
+
+html.dark .popup-body {
+  color: #d6dce8;
+}
+
+html.dark .popup-front {
+  color: #eef0f5;
+}
+
+html.dark .popup-btn {
+  color: #aab3c5;
+  background: #1d232e;
+  border-color: #333b4a;
+}
+
+html.dark .popup-btn small {
+  color: #7f8aa0;
+}
+
+html.dark .popup-btn.unknown:not(:disabled) {
+  background: #2d2313;
+  border-color: #5a4322;
+  color: #f0b05e;
+}
+
+html.dark .popup-btn.familiar:not(:disabled) {
+  background: #1d2440;
+  border-color: #3d4a8a;
+  color: #a9b8ff;
+}
+
+html.dark .popup-edit-wysiwyg,
+html.dark .popup-back {
+  color: #ccd3e0;
+  background: rgba(26, 31, 42, 0.9);
+  border-color: #2f3746;
+}
+
+html.dark .popup-back mark {
+  background: #7a5b16;
+  color: #ffe9c2;
+}
+
+html.dark .popup-footer {
+  border-top-color: #262c38;
+}
+
+html.dark .popup-progress {
+  color: #9aa3b5;
+}
+
+/* 卡面表格线（浅色是浅灰，深色用中性深线） */
+html.dark .popup-front th,
+html.dark .popup-front td,
+html.dark .popup-edit-wysiwyg th,
+html.dark .popup-edit-wysiwyg td,
+html.dark .popup-panel th,
+html.dark .popup-panel td,
+html.dark .workspace-wysiwyg th,
+html.dark .workspace-wysiwyg td,
+html.dark .preview-pane th,
+html.dark .preview-pane td {
+  border-color: #39415455;
+}
+
+/* 仪表盘 */
+html.dark .week-chart {
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 44px,
+    rgba(255, 255, 255, 0.05) 45px,
+    transparent 46px
+  );
+  border-bottom-color: #2a3140;
+}
+
+html.dark .level-bar-track {
+  background: #232937;
+}
+
+/* AI 独立窗口 */
+html.dark .ai-window {
+  background: #161a22;
+  border-left-color: var(--line);
+}
+
+html.dark .ai-window-head,
+html.dark .ai-sidebar-url {
+  border-bottom-color: #262c38;
+}
+
+html.dark .ai-webview-slot {
+  background: #10131a;
+}
+
+/* 滚动条在深底上改用浅色半透明 */
+html.dark *::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+html.dark *::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

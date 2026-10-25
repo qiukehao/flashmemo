@@ -3,7 +3,9 @@
 
 use crate::db::Db;
 use crate::import::ImportReport;
-use crate::services::{self, CardDto, DeckOverview, ExportReport, ImportFile, ImportPreview, ReviewSession};
+use crate::services::{
+    self, CardDto, DeckOverview, ExportReport, ImportFile, ImportPreview, ReviewSession,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Manager, State};
@@ -515,9 +517,13 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, Strin
     use tauri_plugin_autostart::ManagerExt;
     let autolaunch = app.autolaunch();
     if enabled {
-        autolaunch.enable().map_err(|e| format!("开启开机自启失败: {e}"))?;
+        autolaunch
+            .enable()
+            .map_err(|e| format!("开启开机自启失败: {e}"))?;
     } else {
-        autolaunch.disable().map_err(|e| format!("关闭开机自启失败: {e}"))?;
+        autolaunch
+            .disable()
+            .map_err(|e| format!("关闭开机自启失败: {e}"))?;
     }
     autolaunch
         .is_enabled()

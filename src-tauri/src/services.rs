@@ -335,11 +335,7 @@ pub fn cards_markdown(cards: &[db::Card]) -> String {
 /// Export cards (optionally one deck) as Markdown to `path`. Soft-deleted
 /// (suspended) cards are excluded — they are deleted content; review progress
 /// is scheduling state, which a Markdown export deliberately does not carry.
-pub fn export_markdown(
-    db: &Db,
-    path: &str,
-    deck: Option<&str>,
-) -> Result<ExportReport, String> {
+pub fn export_markdown(db: &Db, path: &str, deck: Option<&str>) -> Result<ExportReport, String> {
     let overviews = list_overview(db)?;
     let mut cards: Vec<db::Card> = Vec::new();
     for o in &overviews {
@@ -1944,9 +1940,15 @@ mod tests {
 
     #[test]
     fn export_markdown_round_trips_through_the_importer() {
-        let mut d = db();
-        let _ = add_card(&d, "MySQL", "事务", "ACID 是什么？", "- 原子性
-- 一致性");
+        let d = db();
+        let _ = add_card(
+            &d,
+            "MySQL",
+            "事务",
+            "ACID 是什么？",
+            "- 原子性
+- 一致性",
+        );
         let _ = add_card_with_front(
             &d,
             "MySQL",
@@ -1955,7 +1957,13 @@ mod tests {
             "磁盘 IO 更少",
             "从树高与叶子链表两方面讲",
         );
-        let _ = add_card(&d, "Redis", "缓存", "穿透与击穿？", "穿透＝不存在；击穿＝热点过期");
+        let _ = add_card(
+            &d,
+            "Redis",
+            "缓存",
+            "穿透与击穿？",
+            "穿透＝不存在；击穿＝热点过期",
+        );
         // 软删卡（用户删掉的）不导出。
         let gone = add_card(&d, "Redis", "缓存", "已删除的卡", "x").unwrap();
         let _ = delete_card(&d, gone.id);
@@ -1971,17 +1979,16 @@ mod tests {
         let md = cards_markdown(&cards);
         // 重新解析 → 与原库逐字段一致（幂等往返：导出文件再导入是 no-op）。
         let parsed = parse_markdown(&md, "导出");
-        let mut d2 = db();
-        let report = import::import(&mut d2, &parsed, None, false).unwrap();
+        let d2 = db();
+        let report = import::import(&d2, &parsed, None, false).unwrap();
         assert_eq!(report.added, 3, "{report:?}");
         for (want_deck, want_ch, want_title) in [
             ("MySQL", "事务", "ACID 是什么？"),
             ("MySQL", "索引", "为什么用 B+ 树？"),
             ("Redis", "缓存", "穿透与击穿？"),
         ] {
-            let got = d2
-                .0
-                .query_row(
+            let got =
+                d2.0.query_row(
                     "SELECT c.content_md, COALESCE(c.front_md,'') FROM card c
                      JOIN chapter ch ON ch.id=c.chapter_id JOIN deck dk ON dk.id=ch.deck_id
                      WHERE dk.name=?1 AND ch.name=?2 AND c.title=?3",

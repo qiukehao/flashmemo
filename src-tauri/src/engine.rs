@@ -160,7 +160,11 @@ pub enum ComboStep {
     Escalate,
 }
 
-pub fn combo_step(since: Option<DateTime<Utc>>, now: DateTime<Utc>, escalate_min: u32) -> ComboStep {
+pub fn combo_step(
+    since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    escalate_min: u32,
+) -> ComboStep {
     match since {
         None => ComboStep::Remind,
         Some(t0) => {
@@ -451,7 +455,9 @@ fn read_settings(db: &Db) -> EngineSettings {
         popup_idle_escape_min: get("popup_idle_escape_min")
             .and_then(|v| v.parse().ok())
             .unwrap_or(5),
-        fullscreen_dnd: get("fullscreen_dnd").map(|v| v.trim() != "0").unwrap_or(true),
+        fullscreen_dnd: get("fullscreen_dnd")
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true),
         combo_escalate_min: get("combo_escalate_min")
             .and_then(|v| v.parse().ok())
             .unwrap_or(5)
@@ -1580,7 +1586,11 @@ mod tests {
     #[test]
     fn combo_step_reminds_then_escalates() {
         let t0 = Utc::now();
-        assert_eq!(combo_step(None, t0, 5), ComboStep::Remind, "没起表 → 先轻提醒");
+        assert_eq!(
+            combo_step(None, t0, 5),
+            ComboStep::Remind,
+            "没起表 → 先轻提醒"
+        );
         assert_eq!(
             combo_step(Some(t0), t0 + chrono::Duration::minutes(4), 5),
             ComboStep::Remind,
@@ -1600,7 +1610,10 @@ mod tests {
     #[test]
     fn dnd_blocks_only_auto_popups_while_fullscreen() {
         use crate::engine::dnd_blocks_popup;
-        assert!(dnd_blocks_popup(true, true, false), "全屏 + 开启 + 自动 → 拦");
+        assert!(
+            dnd_blocks_popup(true, true, false),
+            "全屏 + 开启 + 自动 → 拦"
+        );
         assert!(!dnd_blocks_popup(true, true, true), "手动触发永不拦");
         assert!(!dnd_blocks_popup(true, false, false), "设置关了就不拦");
         assert!(!dnd_blocks_popup(false, true, false), "没在全屏不拦");

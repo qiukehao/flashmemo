@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./lib/api";
+import { applyTheme, watchSystemTheme } from "./lib/theme";
 import { isTauri } from "./lib/env";
 import type { TabKey } from "./lib/tabs";
 import ExamComposer from "./components/ExamComposer";
@@ -46,6 +47,15 @@ export default function MainShell() {
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [showExam, setShowExam] = useState(false);
   const newMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // 主题（SPEC §16）：启动时按设置应用；跟随系统时监听系统切换。
+  useEffect(() => {
+    api
+      .getSettings()
+      .then((st) => applyTheme(st.theme_mode ?? "system"))
+      .catch(() => {});
+    return watchSystemTheme();
+  }, []);
 
   // Jump-to-edit from the popup's 知识铺垫 (§11.2): open the deck editor.
   useEffect(() => {
